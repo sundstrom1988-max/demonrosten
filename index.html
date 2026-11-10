@@ -114,6 +114,15 @@ select{
   width:100%;
 }
 select:focus-visible{outline:2px solid var(--blood);outline-offset:1px}
+.voicerow input{
+  font:400 15px Inter, system-ui, sans-serif;
+  color:var(--fg);background:#201a2e;border:1px solid var(--line);border-radius:12px;padding:12px;width:100%;
+}
+.voicerow input:focus-visible{outline:2px solid var(--blood);outline-offset:1px}
+details{border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+details summary{cursor:pointer;font-size:13px;color:var(--dim);font-weight:600}
+details[open] summary{margin-bottom:10px}
+details .voicerow{margin-bottom:10px}
 .sayrow button{flex:0 0 auto;background:var(--blood-deep);border-color:var(--blood);color:#fff}
 .hint{font-size:12px;color:var(--dim);margin:0}
 
@@ -176,6 +185,27 @@ footer{font-size:12px;color:var(--dim);text-align:center}
     </div>
     <div class="board" id="board"></div>
     <p class="hint">Replikerna läses av mobilens talsyntes i valt röstläge — djup-reglaget styr tonläget även här. Obs: på en dator ignorerar Windows-rösterna ofta tonläget helt, så testa på mobilen innan du dömer.</p>
+  </section>
+
+  <section class="card">
+    <h2>Ring på riktigt</h2>
+    <div class="sayrow">
+      <input id="dialNumber" type="tel" placeholder="07X XXX XX XX" autocomplete="off">
+      <button id="callBtn">RING</button>
+    </div>
+    <p class="hint" id="callStatus">Ej kopplad till Twilio än — öppna inställningarna nedan.</p>
+    <details id="callSetup">
+      <summary>Koppling (Twilio)</summary>
+      <div class="voicerow">
+        <label for="funcUrl">Function-URL</label>
+        <input id="funcUrl" autocomplete="off" placeholder="https://demonrosten-XXXX.twil.io">
+      </div>
+      <div class="voicerow">
+        <label for="funcPin">PIN (samma som APP_PIN i Twilio)</label>
+        <input id="funcPin" autocomplete="off" placeholder="1234">
+      </div>
+    </details>
+    <p class="hint">Samtalet går via internet till offrets vanliga mobil — du pratar i luren, hen hör valt röstläge live. Snackbrädan går inte in i samtalet. Kostar ca 1 kr/min.</p>
   </section>
 
   <section class="card">
@@ -362,17 +392,20 @@ function setStatus(){
   else { statusPill.textContent = "LIVE"; statusPill.className = "pill live"; }
 }
 
+// Alla aktiva ljudkedjor (lokal högtalare + ev. pågående samtal) styrs av samma reglage
+const chains = [];
 function applyParams(){
-  if (!ctx) return;
-  const m = MODES[mode], t = ctx.currentTime;
-  workletNode.parameters.get("ratio").setTargetAtTime(m.ratio(+depthEl.value), t, 0.03);
-  workletNode.parameters.get("ringFreq").setTargetAtTime(m.ring ? m.ring.freq : 0, t, 0.03);
-  workletNode.parameters.get("ringDepth").setTargetAtTime(m.ring ? m.ring.depth : 0, t, 0.03);
-  echoGain.gain.setTargetAtTime((+echoEl.value / 100) * 0.55, t, 0.03);
-  volGain.gain.setTargetAtTime(+volEl.value / 100, t, 0.03);
-  // Telefonfilter (callcenter-linjen): smalband i scam-läget, vidöppet annars
-  hpFilter.frequency.setTargetAtTime(m.phone ? 300 : 20, t, 0.03);
-  lpFilter.frequency.setTargetAtTime(m.phone ? 3200 : 20000, t, 0.03);
+  const m = MODES[mode];
+  for (const c of chains){
+    const t = c.ctx.currentTime;
+    c.worklet.parameters.get("ratio").setTargetAtTime(m.ratio(+depthEl.value), t, 0.03);
+    c.worklet.parameters.get("ringFreq").setTargetAtTime(m.ring ? m.ring.freq : 0, t, 0.03);
+    c.worklet.parameters.get("ringDepth").setTargetAtTime(m.ring ? m.ring.depth : 0, t, 0.03);
+    c.echoGain.gain.setTargetAtTime((+echoEl.value / 100) * 0.55, t, 0.03);
+    c.volGain.gain.setTargetAtTime(+volEl.value / 100, t, 0.03);
+    c.hp.frequency.setTargetAtTime(m.phone ? 300 : 20, t, 0.03);
+    c.lp.frequency.setTargetAtTime(m.phone ? 3200 : 20000, t, 0.03);
+  }
 }
 
 async function start(){
@@ -410,6 +443,8 @@ async function start(){
     volGain.connect(comp); comp.connect(panicGain);
     panicGain.connect(analyser); panicGain.connect(ctx.destination);
 
+    ctx._chain = { ctx, worklet: workletNode, echoGain, volGain, hp: hpFilter, lp: lpFilter, panicGain };
+    chains.push(ctx._chain);
     applyParams();
     powerBtn.textContent = "STÄNG AV";
     powerBtn.classList.add("on");
@@ -430,6 +465,10 @@ async function start(){
 function stop(){
   cancelAnimationFrame(rafId);
   $("meterFill").style.width = "0%";
+  if (ctx && ctx._chain){
+    const i = chains.indexOf(ctx._chain);
+    if (i >= 0) chains.splice(i, 1);
+  }
   if (ctx){
     try { ctx._stream?.getTracks().forEach(t => t.stop()); } catch (e) {}
     try { ctx.close(); } catch (e) {}
@@ -438,7 +477,7 @@ function stop(){
   ctx = null; workletNode = null; wakeLock = null; panicMuted = false;
   powerBtn.textContent = "STARTA MICKEN";
   powerBtn.classList.remove("on");
-  panicBtn.hidden = true;
+  panicBtn.hidden = !activeCall;
   panicBtn.classList.remove("muted");
   panicBtn.textContent = "PANIK-MUTE";
   setStatus();
@@ -460,9 +499,9 @@ function meterLoop(){
 
 powerBtn.addEventListener("click", () => { ctx ? stop() : start(); });
 panicBtn.addEventListener("click", () => {
-  if (!ctx) return;
+  if (!chains.length) return;
   panicMuted = !panicMuted;
-  panicGain.gain.setTargetAtTime(panicMuted ? 0 : 1, ctx.currentTime, 0.01);
+  for (const c of chains) c.panicGain.gain.setTargetAtTime(panicMuted ? 0 : 1, c.ctx.currentTime, 0.01);
   panicBtn.classList.toggle("muted", panicMuted);
   panicBtn.textContent = panicMuted ? "MUTAD — SLÅ PÅ" : "PANIK-MUTE";
   setStatus();
@@ -569,6 +608,128 @@ $("modes").addEventListener("click", e => {
   buildBoard();
   fillVoiceSel();
 });
+
+// ---------- Ring på riktigt (Twilio) ----------
+const callCfg = { url: "", pin: "" };
+try { Object.assign(callCfg, JSON.parse(localStorage.getItem("demonrosten-twilio") || "{}")); } catch (e) {}
+const funcUrlEl = $("funcUrl"), funcPinEl = $("funcPin"), callStatusEl = $("callStatus"),
+      callBtn = $("callBtn"), dialEl = $("dialNumber");
+funcUrlEl.value = callCfg.url; funcPinEl.value = callCfg.pin;
+if (!callCfg.url) $("callSetup").open = true;
+else callStatusEl.textContent = "Redo att ringa.";
+
+function saveCfg(){
+  callCfg.url = funcUrlEl.value.trim().replace(/\/+$/, "");
+  callCfg.pin = funcPinEl.value.trim();
+  try { localStorage.setItem("demonrosten-twilio", JSON.stringify(callCfg)); } catch (e) {}
+  if (callCfg.url) callStatusEl.textContent = "Redo att ringa.";
+}
+funcUrlEl.addEventListener("change", saveCfg);
+funcPinEl.addEventListener("change", saveCfg);
+
+let twilioDevice = null, activeCall = null, sdkLoading = null;
+
+function loadSdk(){
+  if (window.Twilio && window.Twilio.Device) return Promise.resolve();
+  if (sdkLoading) return sdkLoading;
+  sdkLoading = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/@twilio/voice-sdk@2.12.1/dist/twilio.min.js";
+    s.onload = resolve;
+    s.onerror = () => { sdkLoading = null; reject(new Error("Kunde inte ladda samtalsmotorn.")); };
+    document.head.appendChild(s);
+  });
+  return sdkLoading;
+}
+
+// Twilio AudioProcessor: micken går genom demonmotorn INNAN den når samtalet
+const demonProcessor = {
+  async createProcessedStream(stream){
+    const actx = new AudioContext({ latencyHint: "interactive" });
+    const blobUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
+    await actx.audioWorklet.addModule(blobUrl);
+    URL.revokeObjectURL(blobUrl);
+    const src = actx.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(actx, "pitch-shifter");
+    const delay = actx.createDelay(1); delay.delayTime.value = 0.17;
+    const eg = actx.createGain(); node.connect(delay); delay.connect(eg); eg.connect(delay);
+    const mix = actx.createGain(); node.connect(mix); eg.connect(mix);
+    const hp = actx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 20;
+    const lp = actx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 20000;
+    const vg = actx.createGain();
+    const comp = actx.createDynamicsCompressor(); comp.threshold.value = -18; comp.ratio.value = 8;
+    const pg = actx.createGain();
+    const dest = actx.createMediaStreamDestination();
+    src.connect(node);
+    mix.connect(hp); hp.connect(lp); lp.connect(vg); vg.connect(comp); comp.connect(pg); pg.connect(dest);
+    this._chain = { ctx: actx, worklet: node, echoGain: eg, volGain: vg, hp, lp, panicGain: pg };
+    chains.push(this._chain);
+    applyParams();
+    return dest.stream;
+  },
+  async destroyProcessedStream(stream){
+    if (this._chain){
+      const i = chains.indexOf(this._chain);
+      if (i >= 0) chains.splice(i, 1);
+      try { this._chain.ctx.close(); } catch (e) {}
+      this._chain = null;
+    }
+  }
+};
+
+function toE164(raw){
+  const n = (raw || "").replace(/[\s\-()]/g, "");
+  if (/^0\d{6,12}$/.test(n)) return "+46" + n.slice(1);
+  if (/^\+\d{8,15}$/.test(n)) return n;
+  return null;
+}
+
+function endCallUi(msg){
+  activeCall = null;
+  if (twilioDevice){ try { twilioDevice.destroy(); } catch (e) {} twilioDevice = null; }
+  callBtn.textContent = "RING";
+  callStatusEl.textContent = msg;
+  if (!ctx) panicBtn.hidden = true;
+}
+
+async function startCall(){
+  if (!callCfg.url || !callCfg.pin){
+    $("callSetup").open = true;
+    callStatusEl.textContent = "Fyll i Function-URL och PIN först.";
+    return;
+  }
+  const num = toE164(dialEl.value);
+  if (!num){ callStatusEl.textContent = "Ogiltigt nummer — skriv 07X… eller +46…"; return; }
+  callBtn.disabled = true;
+  try {
+    callStatusEl.textContent = "Hämtar biljett …";
+    const r = await fetch(callCfg.url + "/token?pin=" + encodeURIComponent(callCfg.pin));
+    if (!r.ok) throw new Error(r.status === 403 ? "Fel PIN." : "Servern svarade " + r.status);
+    const data = await r.json();
+    callStatusEl.textContent = "Laddar samtalsmotorn …";
+    await loadSdk();
+    twilioDevice = new Twilio.Device(data.token, { codecPreferences: ["opus", "pcmu"] });
+    twilioDevice.audio.addProcessor(demonProcessor);
+    callStatusEl.textContent = "Ringer " + num + " …";
+    activeCall = await twilioDevice.connect({ params: { To: num } });
+    callBtn.textContent = "LÄGG PÅ";
+    panicBtn.hidden = false;
+    activeCall.on("accept", () => { callStatusEl.textContent = "SAMTAL PÅGÅR — rösten är förvrängd. Prata i luren."; });
+    activeCall.on("disconnect", () => endCallUi("Samtalet avslutat."));
+    activeCall.on("cancel", () => endCallUi("Samtalet avbröts."));
+    activeCall.on("error", e => endCallUi("Samtalsfel: " + (e.message || e.code || e)));
+  } catch (e) {
+    endCallUi("Fel: " + (e.message || e));
+  } finally {
+    callBtn.disabled = false;
+  }
+}
+
+callBtn.addEventListener("click", () => {
+  if (activeCall) activeCall.disconnect();
+  else startCall();
+});
+dialEl.addEventListener("keydown", e => { if (e.key === "Enter" && !activeCall) startCall(); });
 </script>
 </body>
 </html>
