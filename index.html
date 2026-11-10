@@ -163,6 +163,18 @@ footer{font-size:12px;color:var(--dim);text-align:center}
     </div>
     <p id="err"></p>
     <div id="meter" aria-hidden="true"><div id="meterFill"></div></div>
+    <details id="devSetup">
+      <summary>Ljudenheter (för samtal via datorn)</summary>
+      <div class="voicerow">
+        <label for="micSel">Mikrofon</label>
+        <select id="micSel"></select>
+      </div>
+      <div class="voicerow">
+        <label for="outSel">Ljudutgång</label>
+        <select id="outSel"></select>
+      </div>
+      <p class="hint" id="devHint">Starta micken en gång så visas enheternas namn. Välj "CABLE Input" som utgång för att skicka rösten in i ett Phone Link-samtal.</p>
+    </details>
     <div class="slider">
       <label for="depth"><span id="depthLabel">Demondjup</span> <output id="depthOut">70 %</output></label>
       <input type="range" id="depth" min="0" max="100" value="70">
@@ -419,9 +431,9 @@ async function start(){
     const blobUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
     await ctx.audioWorklet.addModule(blobUrl);
     URL.revokeObjectURL(blobUrl);
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    });
+    const audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+    if (devChoice.mic) audio.deviceId = { ideal: devChoice.mic };
+    const stream = await navigator.mediaDevices.getUserMedia({ audio });
     const src = ctx.createMediaStreamSource(stream);
     workletNode = new AudioWorkletNode(ctx, "pitch-shifter");
 
@@ -457,6 +469,8 @@ async function start(){
     setStatus();
     try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (e) {}
     ctx._stream = stream;
+    fillDevices();
+    applySink();
   } catch (e) {
     stop();
     errEl.textContent = e.name === "NotAllowedError"
@@ -514,6 +528,61 @@ panicBtn.addEventListener("click", () => {
 for (const [el, out] of [[depthEl, "depthOut"], [echoEl, "echoOut"], [volEl, "volOut"]]){
   el.addEventListener("input", () => { $(out).textContent = el.value + " %"; applyParams(); });
 }
+
+// ---------- Ljudenheter (mikrofon + utgång, t.ex. virtuell kabel till Phone Link) ----------
+const micSel = $("micSel"), outSel = $("outSel");
+const devChoice = { mic: "", out: "" };
+try { Object.assign(devChoice, JSON.parse(localStorage.getItem("demonrosten-devices") || "{}")); } catch (e) {}
+const sinkSupported = typeof AudioContext !== "undefined" && "setSinkId" in AudioContext.prototype;
+
+async function fillDevices(){
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  let devs = [];
+  try { devs = await navigator.mediaDevices.enumerateDevices(); } catch (e) { return; }
+  const lists = [
+    [micSel, "audioinput", "mic", "Standardmikrofon"],
+    [outSel, "audiooutput", "out", "Standardutgång (högtalare)"]
+  ];
+  for (const [sel, kind, key, defLabel] of lists){
+    sel.textContent = "";
+    const def = document.createElement("option");
+    def.value = ""; def.textContent = defLabel;
+    sel.appendChild(def);
+    for (const d of devs){
+      if (d.kind !== kind || !d.deviceId || d.deviceId === "default" || d.deviceId === "communications") continue;
+      const o = document.createElement("option");
+      o.value = d.deviceId;
+      o.textContent = d.label || "Enhet " + d.deviceId.slice(0, 6);
+      sel.appendChild(o);
+    }
+    sel.value = devChoice[key] || "";
+    if (sel.selectedIndex === -1) sel.value = "";
+  }
+  if (!sinkSupported){
+    outSel.disabled = true;
+    $("devHint").textContent = "Den här webbläsaren kan inte byta ljudutgång. Använd Chrome på datorn för samtal via Phone Link.";
+  }
+}
+
+async function applySink(){
+  if (!ctx || !sinkSupported) return;
+  try { await ctx.setSinkId(devChoice.out || ""); }
+  catch (e) {
+    errEl.textContent = "Kunde inte byta ljudutgång: " + (e.message || e.name);
+    errEl.style.display = "block";
+  }
+}
+
+function saveDevices(){
+  try { localStorage.setItem("demonrosten-devices", JSON.stringify(devChoice)); } catch (e) {}
+}
+micSel.addEventListener("change", async () => {
+  devChoice.mic = micSel.value; saveDevices();
+  if (ctx){ stop(); await start(); }
+});
+outSel.addEventListener("change", () => { devChoice.out = outSel.value; saveDevices(); applySink(); });
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener("devicechange", fillDevices);
+fillDevices();
 
 // ---------- Snackbrädan (talsyntes per röstläge) ----------
 const voiceChoice = { demon: "", dam: "", scam: "", gubbe: "", bebis: "", robot: "" };
