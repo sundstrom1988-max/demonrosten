@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Demonrösten</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pirata+One&family=Inter:wght@400;600;800&display=swap">
+<style>
+/* Layout: mörk enkolumns-dashboard för mobil — röstläge, live-kort, snackbräda */
+:root{
+  --bg:#0b0a0e;
+  --panel:#151020;
+  --line:#2b2138;
+  --fg:#ece6f2;
+  --dim:#8d8498;
+  --blood:#e03131;
+  --blood-deep:#7a1010;
+  --ok:#51cf66;
+  --warn:#fab005;
+  color-scheme: dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  background:var(--bg);
+  background-image:radial-gradient(ellipse 80% 50% at 50% -10%, #2a0a0f 0%, transparent 60%);
+  color:var(--fg);
+  font:400 15px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding-block:calc(16px + env(safe-area-inset-top,0px)) calc(24px + env(safe-area-inset-bottom,0px));
+  padding-left:max(16px, env(safe-area-inset-left,0px));
+  padding-right:max(16px, env(safe-area-inset-right,0px));
+}
+main{max-width:520px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+h1{
+  font:400 44px/1 "Pirata One", Inter, serif;
+  margin:0;
+  color:var(--blood);
+  text-shadow:0 0 24px rgba(224,49,49,.35);
+  letter-spacing:.02em;
+}
+.pill{
+  font-weight:800;font-size:12px;letter-spacing:.12em;text-transform:uppercase;
+  padding:6px 14px;border-radius:999px;border:1px solid var(--line);
+  background:var(--panel);color:var(--dim);white-space:nowrap;
+}
+.pill.live{color:#fff;background:var(--blood);border-color:var(--blood);animation:pulse 1.2s ease-in-out infinite}
+.pill.muted{color:#1a1505;background:var(--warn);border-color:var(--warn)}
+@keyframes pulse{50%{box-shadow:0 0 0 6px rgba(224,49,49,.25)}}
+@media (prefers-reduced-motion: reduce){.pill.live{animation:none}}
+
+.card{
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:16px;
+  display:flex;flex-direction:column;gap:14px;
+}
+.card h2{
+  margin:0;font-size:12px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);
+}
+
+/* Röstlägen */
+.modes{display:flex;gap:8px}
+.modes button{flex:1;font-size:13px;padding:12px 6px;font-weight:800;letter-spacing:.04em}
+.modes button.active{background:var(--blood-deep);border-color:var(--blood);color:#fff}
+
+/* Live-delen */
+.bigrow{display:flex;gap:10px}
+.bigrow button{flex:1}
+button{
+  font:800 16px/1.2 Inter, system-ui, sans-serif;
+  color:var(--fg);
+  background:#201a2e;
+  border:1px solid var(--line);
+  border-radius:12px;
+  padding:16px 12px;
+  cursor:pointer;
+  touch-action:manipulation;
+  -webkit-tap-highlight-color:transparent;
+}
+button:active{transform:translateY(1px)}
+button:focus-visible{outline:2px solid var(--blood);outline-offset:2px}
+#powerBtn.on{background:var(--blood-deep);border-color:var(--blood);color:#fff}
+#panicBtn{background:#3d0d0d;border-color:var(--blood);color:#ffb4b4}
+#panicBtn.muted{background:var(--warn);border-color:var(--warn);color:#1a1505}
+#meter{height:8px;border-radius:999px;background:#201a2e;overflow:hidden}
+#meterFill{height:100%;width:0%;background:linear-gradient(90deg,var(--ok),var(--warn) 70%,var(--blood));transition:width .06s linear}
+.slider{display:flex;flex-direction:column;gap:6px}
+.slider label{display:flex;justify-content:space-between;font-size:13px;color:var(--dim);font-weight:600}
+.slider output{color:var(--fg);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--blood);height:28px;margin:0}
+#err{color:#ffb4b4;font-size:13px;display:none}
+
+/* Snackbrädan */
+.board{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.board button{font-weight:600;font-size:14px;padding:12px 10px;min-height:56px;text-align:left}
+.board button:active{border-color:var(--blood)}
+.sayrow{display:flex;gap:8px}
+.sayrow input{
+  flex:1;min-width:0;
+  font:400 15px Inter, system-ui, sans-serif;
+  color:var(--fg);background:#201a2e;border:1px solid var(--line);border-radius:12px;padding:12px;
+}
+.sayrow input:focus-visible{outline:2px solid var(--blood);outline-offset:1px}
+.sayrow button{flex:0 0 auto;background:var(--blood-deep);border-color:var(--blood);color:#fff}
+.hint{font-size:12px;color:var(--dim);margin:0}
+
+/* Bruksanvisning */
+ol{margin:0;padding-left:20px;color:var(--dim);display:flex;flex-direction:column;gap:6px}
+ol b{color:var(--fg)}
+footer{font-size:12px;color:var(--dim);text-align:center}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Demonrösten</h1>
+    <span class="pill" id="status">AV</span>
+  </header>
+
+  <section class="card">
+    <h2>Röstläge</h2>
+    <div class="modes" id="modes">
+      <button type="button" data-mode="demon" class="active">DEMON</button>
+      <button type="button" data-mode="dam">SEXIG DAM</button>
+      <button type="button" data-mode="scam">SUPPORT&shy;BEDRAGAREN</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Live-rösten</h2>
+    <div class="bigrow">
+      <button id="powerBtn">STARTA MICKEN</button>
+      <button id="panicBtn" hidden>PANIK-MUTE</button>
+    </div>
+    <p id="err"></p>
+    <div id="meter" aria-hidden="true"><div id="meterFill"></div></div>
+    <div class="slider">
+      <label for="depth"><span id="depthLabel">Demondjup</span> <output id="depthOut">70 %</output></label>
+      <input type="range" id="depth" min="0" max="100" value="70">
+    </div>
+    <div class="slider">
+      <label for="echo">Eko <output id="echoOut">25 %</output></label>
+      <input type="range" id="echo" min="0" max="100" value="25">
+    </div>
+    <div class="slider">
+      <label for="vol">Volym <output id="volOut">80 %</output></label>
+      <input type="range" id="vol" min="0" max="150" value="80">
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Snackbrädan</h2>
+    <div class="sayrow">
+      <input id="customText" placeholder="Skriv en egen replik …" maxlength="200" autocomplete="off">
+      <button id="sayBtn">SÄG DET</button>
+    </div>
+    <div class="board" id="board"></div>
+    <p class="hint">Replikerna läses av mobilens talsyntes i valt röstläge — djup-reglaget styr tonläget även här.</p>
+  </section>
+
+  <section class="card">
+    <h2>Så busar du</h2>
+    <ol>
+      <li>Välj röstläge, starta micken och prata — rösten kommer ur <b>den här mobilens högtalare</b>.</li>
+      <li>Ring kompisen från en <b>annan telefon på högtalare</b> och håll den intill.</li>
+      <li>Fastnar skrattet i halsen: <b>PANIK-MUTE</b>.</li>
+    </ol>
+  </section>
+
+  <footer>Busa kompisar som tål det — inte främlingar. Demonen tar inget ansvar.</footer>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const statusPill = $("status"), powerBtn = $("powerBtn"), panicBtn = $("panicBtn"), errEl = $("err");
+const depthEl = $("depth"), echoEl = $("echo"), volEl = $("vol");
+
+// ---------- Röstlägen ----------
+const MODES = {
+  demon: {
+    depthLabel: "Demondjup", depthDef: 70, echoDef: 25, phone: false,
+    ratio: d => 0.95 - (d / 100) * 0.50,          // neråt: 0.95 -> 0.45
+    tts: { lang: "sv", female: false, pitch: d => 0.9 - (d / 100) * 0.6, rate: 0.85 },
+    phrases: [
+      "Hallå …?",
+      "Jag vet vad du gjorde i somras.",
+      "Det är jag som är din internetleverantör. Vi har sett vad du har googlat.",
+      "Din pizza är försenad. Kraftigt försenad.",
+      "Jag ringer angående din bils förlängda garanti.",
+      "Grattis. Du har vunnit en halv miljon … i Monopolpengar.",
+      "Pappa …?",
+      "Sluta ringa hit!",
+      "Jag är hungrig.",
+      "Skatteverket här. Vi behöver prata.",
+      "Din beställning på 400 kilo grus är på väg.",
+      "Lämna tillbaka gräsklipparen. Du vet vilken."
+    ]
+  },
+  dam: {
+    depthLabel: "Tonhöjd", depthDef: 60, echoDef: 8, phone: false,
+    ratio: d => 1.05 + (d / 100) * 0.45,          // uppåt: 1.05 -> 1.50
+    tts: { lang: "sv", female: true, pitch: d => 1.0 + (d / 100) * 0.6, rate: 0.92 },
+    phrases: [
+      "Hej du … jag hoppades att det var du.",
+      "Vilken röst du har. Säg nåt mer.",
+      "Jag såg dig på ICA. Du valde rätt avokado.",
+      "Är det varmt här, eller är det bara du?",
+      "Jag har sparat ditt nummer under Snyggingen.",
+      "Vad gör du … typ just nu?",
+      "Mmm. Intressant. Berätta mer.",
+      "Du låter precis som min nästa pojkvän.",
+      "Nej men sluta … du får mig att rodna.",
+      "Ring mig inte igen … om du inte menar det."
+    ]
+  },
+  scam: {
+    depthLabel: "Skruv", depthDef: 40, echoDef: 0, phone: true,
+    ratio: d => 1.0 + (d / 100) * 0.12,           // nästan rak röst + telefonfilter
+    tts: { lang: "en", female: false, pitch: d => 0.85 + (d / 100) * 0.3, rate: 1.0 },
+    phrases: [
+      "Hello sir, I am calling from Microsoft technical support department.",
+      "Sir, your computer has very serious virus. Very serious.",
+      "Do not hang up sir, this is your final warning.",
+      "I will need you to purchase Google Play gift cards, sir.",
+      "Your IP address has been compromised by hackers.",
+      "Sir, why are you not cooperating? I am trying to help you.",
+      "This call is one hundred percent legitimate, sir.",
+      "I am the senior supervisor of the supervisor.",
+      "Please do not use bad language, sir. I am a professional.",
+      "Madam? Hello? Madam, are you there, madam?"
+    ]
+  }
+};
+let mode = "demon";
+
+// ---------- Live-rösten (Web Audio + AudioWorklet-pitchshifter) ----------
+let ctx = null, workletNode = null, panicMuted = false;
+let echoGain = null, volGain = null, panicGain = null, analyser = null;
+let hpFilter = null, lpFilter = null, rafId = 0, wakeLock = null;
+
+const WORKLET_SRC = `
+class PitchShifter extends AudioWorkletProcessor {
+  static get parameterDescriptors(){
+    return [{name:"ratio", defaultValue:0.6, minValue:0.3, maxValue:1.6, automationRate:"k-rate"}];
+  }
+  constructor(){
+    super();
+    this.N = 1 << 15;
+    this.buf = new Float32Array(this.N);
+    this.w = 0;
+    this.phase = 0;
+    this.grain = Math.round(0.09 * sampleRate);
+  }
+  read(pos){
+    const N = this.N;
+    pos = ((pos % N) + N) % N;
+    const i0 = pos | 0, i1 = (i0 + 1) % N, fr = pos - i0;
+    return this.buf[i0] * (1 - fr) + this.buf[i1] * fr;
+  }
+  process(inputs, outputs, params){
+    const inp = inputs[0] && inputs[0][0];
+    const out = outputs[0] && outputs[0][0];
+    if (!out) return true;
+    if (!inp){ out.fill(0); return true; }
+    const g = this.grain, r = params.ratio[0];
+    for (let i = 0; i < inp.length; i++){
+      this.buf[this.w] = inp[i];
+      this.phase += (1 - r);
+      if (this.phase >= g) this.phase -= g;
+      if (this.phase < 0) this.phase += g;
+      const d1 = this.phase, d2 = (this.phase + g / 2) % g;
+      const g1 = Math.sin(Math.PI * d1 / g), g2 = Math.sin(Math.PI * d2 / g);
+      out[i] = this.read(this.w - d1) * g1 + this.read(this.w - d2) * g2;
+      this.w = (this.w + 1) % this.N;
+    }
+    return true;
+  }
+}
+registerProcessor("pitch-shifter", PitchShifter);
+`;
+
+function setStatus(){
+  if (!ctx){ statusPill.textContent = "AV"; statusPill.className = "pill"; }
+  else if (panicMuted){ statusPill.textContent = "MUTAD"; statusPill.className = "pill muted"; }
+  else { statusPill.textContent = "LIVE"; statusPill.className = "pill live"; }
+}
+
+function applyParams(){
+  if (!ctx) return;
+  const m = MODES[mode], t = ctx.currentTime;
+  workletNode.parameters.get("ratio").setTargetAtTime(m.ratio(+depthEl.value), t, 0.03);
+  echoGain.gain.setTargetAtTime((+echoEl.value / 100) * 0.55, t, 0.03);
+  volGain.gain.setTargetAtTime(+volEl.value / 100, t, 0.03);
+  // Telefonfilter (callcenter-linjen): smalband i scam-läget, vidöppet annars
+  hpFilter.frequency.setTargetAtTime(m.phone ? 300 : 20, t, 0.03);
+  lpFilter.frequency.setTargetAtTime(m.phone ? 3200 : 20000, t, 0.03);
+}
+
+async function start(){
+  errEl.style.display = "none";
+  try {
+    ctx = new AudioContext({ latencyHint: "interactive" });
+    const blobUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
+    await ctx.audioWorklet.addModule(blobUrl);
+    URL.revokeObjectURL(blobUrl);
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    const src = ctx.createMediaStreamSource(stream);
+    workletNode = new AudioWorkletNode(ctx, "pitch-shifter");
+
+    // Eko-loop
+    const delay = ctx.createDelay(1); delay.delayTime.value = 0.17;
+    echoGain = ctx.createGain();
+    workletNode.connect(delay); delay.connect(echoGain); echoGain.connect(delay);
+
+    const mix = ctx.createGain();
+    workletNode.connect(mix); echoGain.connect(mix);
+
+    hpFilter = ctx.createBiquadFilter(); hpFilter.type = "highpass"; hpFilter.frequency.value = 20;
+    lpFilter = ctx.createBiquadFilter(); lpFilter.type = "lowpass"; lpFilter.frequency.value = 20000;
+
+    volGain = ctx.createGain();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -18; comp.ratio.value = 8;
+    panicGain = ctx.createGain();
+    analyser = ctx.createAnalyser(); analyser.fftSize = 512;
+
+    src.connect(workletNode);
+    mix.connect(hpFilter); hpFilter.connect(lpFilter); lpFilter.connect(volGain);
+    volGain.connect(comp); comp.connect(panicGain);
+    panicGain.connect(analyser); panicGain.connect(ctx.destination);
+
+    applyParams();
+    powerBtn.textContent = "STÄNG AV";
+    powerBtn.classList.add("on");
+    panicBtn.hidden = false;
+    meterLoop();
+    setStatus();
+    try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (e) {}
+    ctx._stream = stream;
+  } catch (e) {
+    stop();
+    errEl.textContent = e.name === "NotAllowedError"
+      ? "Du nekade mikrofonen. Tillåt den i Chrome (hänglåset i adressfältet) och försök igen."
+      : "Kunde inte starta ljudet: " + (e.message || e.name || e);
+    errEl.style.display = "block";
+  }
+}
+
+function stop(){
+  cancelAnimationFrame(rafId);
+  $("meterFill").style.width = "0%";
+  if (ctx){
+    try { ctx._stream?.getTracks().forEach(t => t.stop()); } catch (e) {}
+    try { ctx.close(); } catch (e) {}
+  }
+  try { wakeLock?.release(); } catch (e) {}
+  ctx = null; workletNode = null; wakeLock = null; panicMuted = false;
+  powerBtn.textContent = "STARTA MICKEN";
+  powerBtn.classList.remove("on");
+  panicBtn.hidden = true;
+  panicBtn.classList.remove("muted");
+  panicBtn.textContent = "PANIK-MUTE";
+  setStatus();
+}
+
+function meterLoop(){
+  const data = new Uint8Array(analyser.fftSize);
+  const tick = () => {
+    if (!ctx) return;
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++){ const v = (data[i] - 128) / 128; sum += v * v; }
+    const rms = Math.sqrt(sum / data.length);
+    $("meterFill").style.width = Math.min(100, rms * 260) + "%";
+    rafId = requestAnimationFrame(tick);
+  };
+  rafId = requestAnimationFrame(tick);
+}
+
+powerBtn.addEventListener("click", () => { ctx ? stop() : start(); });
+panicBtn.addEventListener("click", () => {
+  if (!ctx) return;
+  panicMuted = !panicMuted;
+  panicGain.gain.setTargetAtTime(panicMuted ? 0 : 1, ctx.currentTime, 0.01);
+  panicBtn.classList.toggle("muted", panicMuted);
+  panicBtn.textContent = panicMuted ? "MUTAD — SLÅ PÅ" : "PANIK-MUTE";
+  setStatus();
+});
+
+for (const [el, out] of [[depthEl, "depthOut"], [echoEl, "echoOut"], [volEl, "volOut"]]){
+  el.addEventListener("input", () => { $(out).textContent = el.value + " %"; applyParams(); });
+}
+
+// ---------- Snackbrädan (talsyntes per röstläge) ----------
+function getVoice(m){
+  if (!("speechSynthesis" in window)) return null;
+  const vs = speechSynthesis.getVoices();
+  const match = vs.filter(v => v.lang && v.lang.toLowerCase().startsWith(m.tts.lang));
+  if (m.tts.female){
+    const f = match.find(v => /female|kvinn|astrid|alva|sofie|ebba|elin|klara/i.test(v.name));
+    if (f) return f;
+  }
+  return match[0] || null;
+}
+if ("speechSynthesis" in window){
+  speechSynthesis.getVoices();
+  speechSynthesis.addEventListener("voiceschanged", () => speechSynthesis.getVoices());
+}
+
+function say(text){
+  if (!("speechSynthesis" in window) || !text.trim()) return;
+  const m = MODES[mode];
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = m.tts.lang === "en" ? "en-US" : "sv-SE";
+  const v = getVoice(m);
+  if (v) u.voice = v;
+  u.pitch = Math.max(0.1, Math.min(2, m.tts.pitch(+depthEl.value)));
+  u.rate = m.tts.rate;
+  u.volume = 1;
+  speechSynthesis.speak(u);
+}
+
+const board = $("board");
+function buildBoard(){
+  board.textContent = "";
+  for (const p of MODES[mode].phrases){
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = p;
+    b.addEventListener("click", () => say(p));
+    board.appendChild(b);
+  }
+}
+buildBoard();
+
+$("sayBtn").addEventListener("click", () => say($("customText").value));
+$("customText").addEventListener("keydown", e => { if (e.key === "Enter") say(e.currentTarget.value); });
+
+// ---------- Lägesväxling ----------
+$("modes").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-mode]");
+  if (!btn || btn.dataset.mode === mode) return;
+  mode = btn.dataset.mode;
+  for (const b of $("modes").querySelectorAll("button")) b.classList.toggle("active", b === btn);
+  const m = MODES[mode];
+  $("depthLabel").textContent = m.depthLabel;
+  depthEl.value = m.depthDef; $("depthOut").textContent = m.depthDef + " %";
+  echoEl.value = m.echoDef;  $("echoOut").textContent = m.echoDef + " %";
+  applyParams();
+  buildBoard();
+});
+</script>
+</body>
+</html>
