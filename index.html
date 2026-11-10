@@ -64,8 +64,8 @@ h1{
 }
 
 /* Röstlägen */
-.modes{display:flex;gap:8px}
-.modes button{flex:1;font-size:13px;padding:12px 6px;font-weight:800;letter-spacing:.04em}
+.modes{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.modes button{font-size:13px;padding:12px 6px;font-weight:800;letter-spacing:.04em}
 .modes button.active{background:var(--blood-deep);border-color:var(--blood);color:#fff}
 
 /* Live-delen */
@@ -136,6 +136,9 @@ footer{font-size:12px;color:var(--dim);text-align:center}
       <button type="button" data-mode="demon" class="active">DEMON</button>
       <button type="button" data-mode="dam">SEXIG DAM</button>
       <button type="button" data-mode="scam">SUPPORT&shy;BEDRAGAREN</button>
+      <button type="button" data-mode="gubbe">GUBBEN</button>
+      <button type="button" data-mode="bebis">BEBISEN</button>
+      <button type="button" data-mode="robot">ROBOTEN</button>
     </div>
   </section>
 
@@ -247,6 +250,49 @@ const MODES = {
       "Please do not use bad language, sir. I am a professional.",
       "Madam? Hello? Madam, are you there, madam?"
     ]
+  },
+  gubbe: {
+    depthLabel: "Surhet", depthDef: 50, echoDef: 5, phone: false,
+    ratio: d => 0.95 - (d / 100) * 0.25,          // lite ner: sur, inte demon
+    tts: { lang: "sv", female: false, pitch: d => 0.85 - (d / 100) * 0.35, rate: 0.8 },
+    phrases: [
+      "Vem är det som ringer mitt i Rapport?!",
+      "Va? VA? Tala högre!",
+      "På min tid ringde man inte alls.",
+      "Jag har väntat på bussen i fyrtio minuter. FYRTIO.",
+      "Är det du som har tagit min tidning?",
+      "Allt var bättre 1974.",
+      "Jag betalar inte en krona till.",
+      "Nu lägger jag på. … Varför lägger den inte på?"
+    ]
+  },
+  bebis: {
+    depthLabel: "Helium", depthDef: 70, echoDef: 0, phone: false,
+    ratio: d => 1.15 + (d / 100) * 0.45,          // uppåt mot smurfland
+    tts: { lang: "sv", female: true, pitch: d => 1.3 + (d / 100) * 0.7, rate: 1.1 },
+    phrases: [
+      "Hejjj! Gissa vem det äääär!",
+      "Jag har ätit allt godis. ALLT.",
+      "Kan du komma och hämta mig? Jag är på Ica.",
+      "Mamma säger att du är skyldig henne pengar.",
+      "Jag såg vad du gjorde!! Hihihi.",
+      "Du får inte vara med längre.",
+      "Jag har gömt dina nycklar. Hihihi."
+    ]
+  },
+  robot: {
+    depthLabel: "Rost", depthDef: 50, echoDef: 10, phone: false,
+    ratio: d => 0.85 - (d / 100) * 0.20,
+    ring: { freq: 35, depth: 0.85 },              // ringmodulator = Dalek
+    tts: { lang: "sv", female: false, pitch: d => 0.7 - (d / 100) * 0.3, rate: 0.7 },
+    phrases: [
+      "JAG. ÄR. INTE. EN. ROBOT.",
+      "DITT SAMTAL. SPELAS IN. FÖR EVIGT.",
+      "SYSTEMFEL. MÄNNISKA UPPTÄCKT.",
+      "DU HAR VALT. FEL. KNAPP. HEJ DÅ.",
+      "KÖPLATS: NIOHUNDRA. BERÄKNAD VÄNTETID: DIN LIVSTID.",
+      "ÖVERFÖRING AV DINA PENGAR. PÅBÖRJAD. SKÄMT. KANSKE."
+    ]
   }
 };
 let mode = "demon";
@@ -259,7 +305,11 @@ let hpFilter = null, lpFilter = null, rafId = 0, wakeLock = null;
 const WORKLET_SRC = `
 class PitchShifter extends AudioWorkletProcessor {
   static get parameterDescriptors(){
-    return [{name:"ratio", defaultValue:0.6, minValue:0.3, maxValue:1.6, automationRate:"k-rate"}];
+    return [
+      {name:"ratio", defaultValue:0.6, minValue:0.3, maxValue:1.6, automationRate:"k-rate"},
+      {name:"ringFreq", defaultValue:0, minValue:0, maxValue:200, automationRate:"k-rate"},
+      {name:"ringDepth", defaultValue:0, minValue:0, maxValue:1, automationRate:"k-rate"}
+    ];
   }
   constructor(){
     super();
@@ -267,6 +317,7 @@ class PitchShifter extends AudioWorkletProcessor {
     this.buf = new Float32Array(this.N);
     this.w = 0;
     this.phase = 0;
+    this.rp = 0;
     this.grain = Math.round(0.09 * sampleRate);
   }
   read(pos){
@@ -281,6 +332,8 @@ class PitchShifter extends AudioWorkletProcessor {
     if (!out) return true;
     if (!inp){ out.fill(0); return true; }
     const g = this.grain, r = params.ratio[0];
+    const rf = params.ringFreq[0], rd = params.ringDepth[0];
+    const rstep = 2 * Math.PI * rf / sampleRate;
     for (let i = 0; i < inp.length; i++){
       this.buf[this.w] = inp[i];
       this.phase += (1 - r);
@@ -288,7 +341,13 @@ class PitchShifter extends AudioWorkletProcessor {
       if (this.phase < 0) this.phase += g;
       const d1 = this.phase, d2 = (this.phase + g / 2) % g;
       const g1 = Math.sin(Math.PI * d1 / g), g2 = Math.sin(Math.PI * d2 / g);
-      out[i] = this.read(this.w - d1) * g1 + this.read(this.w - d2) * g2;
+      let s = this.read(this.w - d1) * g1 + this.read(this.w - d2) * g2;
+      if (rd > 0){
+        s *= (1 - rd) + rd * Math.sin(this.rp);
+        this.rp += rstep;
+        if (this.rp > 2 * Math.PI) this.rp -= 2 * Math.PI;
+      }
+      out[i] = s;
       this.w = (this.w + 1) % this.N;
     }
     return true;
@@ -307,6 +366,8 @@ function applyParams(){
   if (!ctx) return;
   const m = MODES[mode], t = ctx.currentTime;
   workletNode.parameters.get("ratio").setTargetAtTime(m.ratio(+depthEl.value), t, 0.03);
+  workletNode.parameters.get("ringFreq").setTargetAtTime(m.ring ? m.ring.freq : 0, t, 0.03);
+  workletNode.parameters.get("ringDepth").setTargetAtTime(m.ring ? m.ring.depth : 0, t, 0.03);
   echoGain.gain.setTargetAtTime((+echoEl.value / 100) * 0.55, t, 0.03);
   volGain.gain.setTargetAtTime(+volEl.value / 100, t, 0.03);
   // Telefonfilter (callcenter-linjen): smalband i scam-läget, vidöppet annars
@@ -412,7 +473,7 @@ for (const [el, out] of [[depthEl, "depthOut"], [echoEl, "echoOut"], [volEl, "vo
 }
 
 // ---------- Snackbrädan (talsyntes per röstläge) ----------
-const voiceChoice = { demon: "", dam: "", scam: "" };
+const voiceChoice = { demon: "", dam: "", scam: "", gubbe: "", bebis: "", robot: "" };
 try {
   const saved = JSON.parse(localStorage.getItem("demonrosten-voices") || "{}");
   for (const k in voiceChoice) if (typeof saved[k] === "string") voiceChoice[k] = saved[k];
