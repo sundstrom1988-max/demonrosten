@@ -106,6 +106,14 @@ input[type=range]{width:100%;accent-color:var(--blood);height:28px;margin:0}
   color:var(--fg);background:#201a2e;border:1px solid var(--line);border-radius:12px;padding:12px;
 }
 .sayrow input:focus-visible{outline:2px solid var(--blood);outline-offset:1px}
+.voicerow{display:flex;flex-direction:column;gap:6px}
+.voicerow label{font-size:13px;color:var(--dim);font-weight:600}
+select{
+  font:400 15px Inter, system-ui, sans-serif;
+  color:var(--fg);background:#201a2e;border:1px solid var(--line);border-radius:12px;padding:12px;
+  width:100%;
+}
+select:focus-visible{outline:2px solid var(--blood);outline-offset:1px}
 .sayrow button{flex:0 0 auto;background:var(--blood-deep);border-color:var(--blood);color:#fff}
 .hint{font-size:12px;color:var(--dim);margin:0}
 
@@ -155,12 +163,16 @@ footer{font-size:12px;color:var(--dim);text-align:center}
 
   <section class="card">
     <h2>Snackbrädan</h2>
+    <div class="voicerow">
+      <label for="voiceSel">Röst för detta läge</label>
+      <select id="voiceSel"></select>
+    </div>
     <div class="sayrow">
       <input id="customText" placeholder="Skriv en egen replik …" maxlength="200" autocomplete="off">
       <button id="sayBtn">SÄG DET</button>
     </div>
     <div class="board" id="board"></div>
-    <p class="hint">Replikerna läses av mobilens talsyntes i valt röstläge — djup-reglaget styr tonläget även här.</p>
+    <p class="hint">Replikerna läses av mobilens talsyntes i valt röstläge — djup-reglaget styr tonläget även här. Obs: på en dator ignorerar Windows-rösterna ofta tonläget helt, så testa på mobilen innan du dömer.</p>
   </section>
 
   <section class="card">
@@ -186,7 +198,7 @@ const MODES = {
   demon: {
     depthLabel: "Demondjup", depthDef: 70, echoDef: 25, phone: false,
     ratio: d => 0.95 - (d / 100) * 0.50,          // neråt: 0.95 -> 0.45
-    tts: { lang: "sv", female: false, pitch: d => 0.9 - (d / 100) * 0.6, rate: 0.85 },
+    tts: { lang: "sv", female: false, pitch: d => 0.8 - (d / 100) * 0.7, rate: 0.85 },
     phrases: [
       "Hallå …?",
       "Jag vet vad du gjorde i somras.",
@@ -205,7 +217,7 @@ const MODES = {
   dam: {
     depthLabel: "Tonhöjd", depthDef: 60, echoDef: 8, phone: false,
     ratio: d => 1.05 + (d / 100) * 0.45,          // uppåt: 1.05 -> 1.50
-    tts: { lang: "sv", female: true, pitch: d => 1.0 + (d / 100) * 0.6, rate: 0.92 },
+    tts: { lang: "sv", female: true, pitch: d => 1.1 + (d / 100) * 0.9, rate: 0.92 },
     phrases: [
       "Hej du … jag hoppades att det var du.",
       "Vilken röst du har. Säg nåt mer.",
@@ -400,29 +412,66 @@ for (const [el, out] of [[depthEl, "depthOut"], [echoEl, "echoOut"], [volEl, "vo
 }
 
 // ---------- Snackbrädan (talsyntes per röstläge) ----------
+const voiceChoice = { demon: "", dam: "", scam: "" };
+try {
+  const saved = JSON.parse(localStorage.getItem("demonrosten-voices") || "{}");
+  for (const k in voiceChoice) if (typeof saved[k] === "string") voiceChoice[k] = saved[k];
+} catch (e) {}
+
 function getVoice(m){
   if (!("speechSynthesis" in window)) return null;
   const vs = speechSynthesis.getVoices();
   const match = vs.filter(v => v.lang && v.lang.toLowerCase().startsWith(m.tts.lang));
   if (m.tts.female){
-    const f = match.find(v => /female|kvinn|astrid|alva|sofie|ebba|elin|klara/i.test(v.name));
+    const f = match.find(v => /female|kvinn|astrid|alva|sofie|ebba|elin|klara|hedvig|anna|elsa|frida|saga/i.test(v.name));
     if (f) return f;
+    const notMale = match.find(v => !/bengt|male/i.test(v.name));
+    if (notMale) return notMale;
   }
   return match[0] || null;
 }
-if ("speechSynthesis" in window){
-  speechSynthesis.getVoices();
-  speechSynthesis.addEventListener("voiceschanged", () => speechSynthesis.getVoices());
+
+function chosenVoice(){
+  const vs = speechSynthesis.getVoices();
+  return (voiceChoice[mode] && vs.find(v => v.name === voiceChoice[mode])) || getVoice(MODES[mode]);
 }
+
+const voiceSel = $("voiceSel");
+function fillVoiceSel(){
+  if (!("speechSynthesis" in window)) return;
+  const vs = speechSynthesis.getVoices();
+  voiceSel.textContent = "";
+  const def = getVoice(MODES[mode]);
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "Auto" + (def ? " — " + def.name : " (ingen röst hittad)");
+  voiceSel.appendChild(auto);
+  for (const v of vs){
+    const o = document.createElement("option");
+    o.value = v.name;
+    o.textContent = v.name + " (" + v.lang + ")";
+    voiceSel.appendChild(o);
+  }
+  voiceSel.value = voiceChoice[mode] || "";
+  if (voiceSel.selectedIndex === -1) voiceSel.value = "";
+}
+if ("speechSynthesis" in window){
+  fillVoiceSel();
+  speechSynthesis.addEventListener("voiceschanged", fillVoiceSel);
+}
+voiceSel.addEventListener("change", () => {
+  voiceChoice[mode] = voiceSel.value;
+  try { localStorage.setItem("demonrosten-voices", JSON.stringify(voiceChoice)); } catch (e) {}
+});
 
 function say(text){
   if (!("speechSynthesis" in window) || !text.trim()) return;
   const m = MODES[mode];
   speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
-  u.lang = m.tts.lang === "en" ? "en-US" : "sv-SE";
-  const v = getVoice(m);
-  if (v) u.voice = v;
+  const v = chosenVoice();
+  if (v){ u.voice = v; u.lang = v.lang; }
+  else u.lang = m.tts.lang === "en" ? "en-US" : "sv-SE";
   u.pitch = Math.max(0.1, Math.min(2, m.tts.pitch(+depthEl.value)));
   u.rate = m.tts.rate;
   u.volume = 1;
@@ -457,6 +506,7 @@ $("modes").addEventListener("click", e => {
   echoEl.value = m.echoDef;  $("echoOut").textContent = m.echoDef + " %";
   applyParams();
   buildBoard();
+  fillVoiceSel();
 });
 </script>
 </body>
