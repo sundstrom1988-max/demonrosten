@@ -503,7 +503,7 @@ class PitchShifter extends AudioWorkletProcessor {
     const g = this.grain, fm = params.formant[0], tg = params.target[0];
     // Med måltonläge räknas förhållandet ut från talarens egen röst (mörk röst lyfts mer)
     let r = params.ratio[0];
-    if (fm >= 0.5 && tg > 0) r = Math.min(2.4, Math.max(1.15, tg / Math.exp(this.lf)));
+    if (fm >= 0.5 && tg > 0 && this.fc > 20) r =Math.min(2.4, Math.max(1.15, tg / Math.exp(this.lf)));
     this.rNow = r;
     const rf = params.ringFreq[0], rd = params.ringDepth[0];
     const rstep = 2 * Math.PI * rf / sampleRate;
