@@ -455,8 +455,11 @@ class PitchShifter extends AudioWorkletProcessor {
     const lo = Math.min(ph[0], ph[1], ph[2]), hi = Math.max(ph[0], ph[1], ph[2]);
     this.P = ph[0] + ph[1] + ph[2] - lo - hi;
     this.voiced = true;
-    this.fc++;
-    this.lf += Math.max(0.005, 1 / this.fc) * (Math.log(sampleRate / this.P) - this.lf);
+    // Bara tydlig, stark röst får flytta medeltonläget (inte bakgrundsljud)
+    if (e / W > 1e-5 && df[picked] < 0.2){
+      this.fc++;
+      this.lf += Math.max(0.005, 1 / this.fc) * (Math.log(sampleRate / this.P) - this.lf);
+    }
   }
   placeGrain(r, f){
     const P = this.P, N1 = this.N - 1, M1 = this.M - 1;
