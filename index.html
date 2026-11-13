@@ -431,9 +431,16 @@ async function start(){
     const blobUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
     await ctx.audioWorklet.addModule(blobUrl);
     URL.revokeObjectURL(blobUrl);
-    const audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
-    if (devChoice.mic) audio.deviceId = { ideal: devChoice.mic };
-    const stream = await navigator.mediaDevices.getUserMedia({ audio });
+    const base = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+    let stream = null;
+    if (devChoice.mic){
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { ...base, deviceId: { exact: devChoice.mic } } });
+      } catch (e) {
+        if (e.name === "NotAllowedError") throw e;
+      }
+    }
+    if (!stream) stream = await navigator.mediaDevices.getUserMedia({ audio: base });
     const src = ctx.createMediaStreamSource(stream);
     workletNode = new AudioWorkletNode(ctx, "pitch-shifter");
 
