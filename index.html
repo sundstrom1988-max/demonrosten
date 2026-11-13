@@ -165,6 +165,8 @@ footer{font-size:12px;color:var(--dim);text-align:center}
       <button id="panicBtn" hidden>PANIK-MUTE</button>
     </div>
     <p id="err"></p>
+    <div class="bigrow"><button id="testBtn">PROVLYSSNA 5 S</button></div>
+    <p class="hint">Spelar in rösten som den låter för den du ringer och spelar upp den i dina egna högtalare.</p>
     <div id="meter" aria-hidden="true"><div id="meterFill"></div></div>
     <label class="ptt" for="pttOn">
       <input type="checkbox" id="pttOn">
@@ -186,6 +188,11 @@ footer{font-size:12px;color:var(--dim);text-align:center}
       <label for="depth"><span id="depthLabel">Demondjup</span> <output id="depthOut">70 %</output></label>
       <input type="range" id="depth" min="0" max="100" value="70">
     </div>
+    <div class="slider" id="klangRow" hidden>
+      <label for="klang">Klang (mörk ↔ ljus) <output id="klangOut">45 %</output></label>
+      <input type="range" id="klang" min="0" max="100" value="45">
+    </div>
+    <p class="hint" id="voiceInfo" hidden></p>
     <div class="slider">
       <label for="echo">Eko <output id="echoOut">25 %</output></label>
       <input type="range" id="echo" min="0" max="100" value="25">
@@ -247,7 +254,7 @@ footer{font-size:12px;color:var(--dim);text-align:center}
 "use strict";
 const $ = id => document.getElementById(id);
 const statusPill = $("status"), powerBtn = $("powerBtn"), panicBtn = $("panicBtn"), errEl = $("err");
-const depthEl = $("depth"), echoEl = $("echo"), volEl = $("vol");
+const depthEl = $("depth"), echoEl = $("echo"), volEl = $("vol"), klangEl = $("klang");
 
 // ---------- Röstlägen ----------
 const MODES = {
@@ -271,9 +278,11 @@ const MODES = {
     ]
   },
   dam: {
-    depthLabel: "Tonhöjd", depthDef: 50, echoDef: 8, phone: false,
-    ratio: d => 1.45 + (d / 100) * 0.50,          // tonhöjd upp: 1.45 -> 1.95 (man -> kvinnligt läge)
-    formant: d => 1.12 + (d / 100) * 0.12,        // klangen lyfts bara lite: 1.12 -> 1.24
+    depthLabel: "Tonläge", depthDef: 50, echoDef: 8, phone: false,
+    ratio: d => 1.7,                              // används bara tills motorn hört din röst
+    target: d => 170 + (d / 100) * 90,            // måltonläge 170 -> 260 Hz (kvinnligt register)
+    formant: k => 1.05 + (k / 100) * 0.30,        // klang 1.05 -> 1.35, eget reglage
+    klangDef: 45,
     tts: { lang: "sv", female: true, pitch: d => 1.1 + (d / 100) * 0.9, rate: 0.92 },
     phrases: [
       "Hej du … jag hoppades att det var du.",
@@ -352,7 +361,7 @@ const MODES = {
 let mode = "demon";
 
 // ---------- Live-rösten (Web Audio + AudioWorklet-pitchshifter) ----------
-let ctx = null, workletNode = null, panicMuted = false;
+let ctx = null, workletNode = null, panicMuted = false, testing = false, voiceStat = null;
 let echoGain = null, volGain = null, panicGain = null, analyser = null;
 let hpFilter = null, lpFilter = null, rafId = 0, wakeLock = null;
 
@@ -366,6 +375,7 @@ class PitchShifter extends AudioWorkletProcessor {
     return [
       {name:"ratio", defaultValue:0.6, minValue:0.3, maxValue:2.4, automationRate:"k-rate"},
       {name:"formant", defaultValue:0, minValue:0, maxValue:2, automationRate:"k-rate"},
+      {name:"target", defaultValue:0, minValue:0, maxValue:400, automationRate:"k-rate"},
       {name:"ringFreq", defaultValue:0, minValue:0, maxValue:200, automationRate:"k-rate"},
       {name:"ringDepth", defaultValue:0, minValue:0, maxValue:1, automationRate:"k-rate"}
     ];
@@ -398,6 +408,11 @@ class PitchShifter extends AudioWorkletProcessor {
     this.hopLen = Math.round(0.01 * sampleRate);
     this.P = sampleRate / 120;        // senast kända period i sampel
     this.voiced = false;
+    this.ph = [this.P, this.P, this.P]; // median av tre mätningar tar bort oktavfel
+    this.lf = Math.log(115);          // talarens medeltonläge (log Hz), lärs in efter hand
+    this.fc = 0;
+    this.rep = 0;
+    this.rNow = 1;
   }
   read(pos){
     const N1 = this.N - 1;
@@ -434,8 +449,14 @@ class PitchShifter extends AudioWorkletProcessor {
       const a = df[picked - 1], b = df[picked], c = df[picked + 1], den = a - 2 * b + c;
       if (den > 1e-12) t = picked + 0.5 * (a - c) / den;
     }
-    this.P = t * this.D;
+    const p = t * this.D, ph = this.ph;
+    if (!this.voiced){ ph[0] = p; ph[1] = p; ph[2] = p; }
+    else { ph[0] = ph[1]; ph[1] = ph[2]; ph[2] = p; }
+    const lo = Math.min(ph[0], ph[1], ph[2]), hi = Math.max(ph[0], ph[1], ph[2]);
+    this.P = ph[0] + ph[1] + ph[2] - lo - hi;
     this.voiced = true;
+    this.fc++;
+    this.lf += Math.max(0.005, 1 / this.fc) * (Math.log(sampleRate / this.P) - this.lf);
   }
   placeGrain(r, f){
     const P = this.P, N1 = this.N - 1, M1 = this.M - 1;
@@ -476,7 +497,11 @@ class PitchShifter extends AudioWorkletProcessor {
     const out = outputs[0] && outputs[0][0];
     if (!out) return true;
     if (!inp){ out.fill(0); return true; }
-    const g = this.grain, r = params.ratio[0], fm = params.formant[0];
+    const g = this.grain, fm = params.formant[0], tg = params.target[0];
+    // Med måltonläge räknas förhållandet ut från talarens egen röst (mörk röst lyfts mer)
+    let r = params.ratio[0];
+    if (fm >= 0.5 && tg > 0) r = Math.min(2.4, Math.max(1.15, tg / Math.exp(this.lf)));
+    this.rNow = r;
     const rf = params.ringFreq[0], rd = params.ringDepth[0];
     const rstep = 2 * Math.PI * rf / sampleRate;
     const N1 = this.N - 1, M1 = this.M - 1;
@@ -519,7 +544,14 @@ class PitchShifter extends AudioWorkletProcessor {
       out[i] = s;
       this.n++;
     }
-    if (psola) this.psolaN = this.n;
+    if (psola){
+      this.psolaN = this.n;
+      this.rep += inp.length;
+      if (this.rep >= sampleRate / 4 && this.port){
+        this.rep = 0;
+        this.port.postMessage({ f0: Math.exp(this.lf), known: this.fc > 20, ratio: this.rNow });
+      }
+    }
     return true;
   }
 }
@@ -540,7 +572,8 @@ function applyParams(){
   for (const c of chains){
     const t = c.ctx.currentTime;
     c.worklet.parameters.get("ratio").setTargetAtTime(m.ratio(+depthEl.value), t, 0.03);
-    c.worklet.parameters.get("formant").setValueAtTime(m.formant ? m.formant(+depthEl.value) : 0, t);
+    c.worklet.parameters.get("formant").setValueAtTime(m.formant ? m.formant(+klangEl.value) : 0, t);
+    c.worklet.parameters.get("target").setValueAtTime(m.target ? m.target(+depthEl.value) : 0, t);
     c.worklet.parameters.get("ringFreq").setTargetAtTime(m.ring ? m.ring.freq : 0, t, 0.03);
     c.worklet.parameters.get("ringDepth").setTargetAtTime(m.ring ? m.ring.depth : 0, t, 0.03);
     c.echoGain.gain.setTargetAtTime((+echoEl.value / 100) * 0.55, t, 0.03);
@@ -569,6 +602,7 @@ async function start(){
     if (!stream) stream = await navigator.mediaDevices.getUserMedia({ audio: base });
     const src = ctx.createMediaStreamSource(stream);
     workletNode = new AudioWorkletNode(ctx, "pitch-shifter");
+    workletNode.port.onmessage = e => { voiceStat = e.data; showVoiceInfo(); };
 
     // Eko-loop
     const delay = ctx.createDelay(1); delay.delayTime.value = 0.17;
@@ -658,15 +692,88 @@ panicBtn.addEventListener("click", () => {
   setStatus();
 });
 
-for (const [el, out] of [[depthEl, "depthOut"], [echoEl, "echoOut"], [volEl, "volOut"]]){
-  el.addEventListener("input", () => { $(out).textContent = el.value + " %"; applyParams(); });
+for (const [el, out] of [[depthEl, "depthOut"], [echoEl, "echoOut"], [volEl, "volOut"], [klangEl, "klangOut"]]){
+  el.addEventListener("input", () => { $(out).textContent = el.value + " %"; applyParams(); showVoiceInfo(); });
 }
+
+// ---------- Tonlägesvisning + provlyssning ----------
+let lastTestInfo = "";
+function showVoiceInfo(){
+  const m = MODES[mode], el = $("voiceInfo");
+  $("klangRow").hidden = !m.formant;
+  if (!m.target){ el.hidden = true; return; }
+  el.hidden = false;
+  const goal = Math.round(m.target(+depthEl.value));
+  const own = voiceStat && voiceStat.known ? "Din röst ligger runt " + Math.round(voiceStat.f0) + " Hz. " : "Prata lite så mäter jag ditt tonläge. ";
+  el.textContent = own + "Målet är " + goal + " Hz (kvinnor ligger oftast på 165–255 Hz)." + lastTestInfo;
+}
+
+// Grundton i en inspelning: median över tonande 40 ms-rutor
+function medianF0(x, sr){
+  const D = Math.max(1, Math.round(sr / 8000)), n = Math.floor(x.length / D), y = new Float32Array(n);
+  for (let i = 0; i < n; i++){ let s = 0; for (let k = 0; k < D; k++) s += x[i * D + k]; y[i] = s / D; }
+  const fs = sr / D, W = Math.round(0.04 * fs), lo = Math.floor(fs / 400), hi = Math.ceil(fs / 70), found = [];
+  for (let a = 0; a + W + hi < n; a += W){
+    let e = 0; for (let j = 0; j < W; j++) e += y[a + j] * y[a + j];
+    if (e / W < 1e-5) continue;
+    let best = 0, bl = 0;
+    for (let lag = lo; lag <= hi; lag++){
+      let c = 0, e2 = 0;
+      for (let j = 0; j < W; j++){ c += y[a + j] * y[a + j + lag]; e2 += y[a + j + lag] * y[a + j + lag]; }
+      const v = c / Math.sqrt(e * e2 + 1e-20);
+      if (v > best + 0.03){ best = v; bl = lag; }
+    }
+    if (best > 0.6) found.push(fs / bl);
+  }
+  if (found.length < 5) return 0;
+  found.sort((p, q) => p - q);
+  return found[found.length >> 1];
+}
+
+const testBtn = $("testBtn");
+async function testListen(){
+  if (testing) return;
+  if (!ctx){ errEl.textContent = "Starta micken först."; errEl.style.display = "block"; return; }
+  errEl.style.display = "none";
+  testing = true;
+  testBtn.disabled = true;
+  const dest = ctx.createMediaStreamDestination();
+  panicGain.connect(dest);
+  const rec = new MediaRecorder(dest.stream), chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  const done = new Promise(res => { rec.onstop = res; });
+  applyParams(); setStatus();
+  rec.start();
+  for (let s = 5; s > 0; s--){
+    testBtn.textContent = "PRATA NU … " + s;
+    await new Promise(res => setTimeout(res, 1000));
+  }
+  rec.stop();
+  await done;
+  try { panicGain.disconnect(dest); } catch (e) {}
+  testing = false;
+  applyParams(); setStatus();
+  const blob = new Blob(chunks, { type: rec.mimeType });
+  try {
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const f = medianF0(buf.getChannelData(0), buf.sampleRate);
+    lastTestInfo = f ? " Senaste provet kom ut på " + Math.round(f) + " Hz." : " Senaste provet: hörde ingen röst.";
+    window._lastTest = { f0Out: f, f0In: voiceStat ? voiceStat.f0 : 0, ratio: voiceStat ? voiceStat.ratio : 0, seconds: buf.duration };
+  } catch (e) { lastTestInfo = ""; }
+  showVoiceInfo();
+  testBtn.textContent = "SPELAR UPP …";
+  const url = URL.createObjectURL(blob), a = new Audio(url);
+  const finish = () => { URL.revokeObjectURL(url); testBtn.textContent = "PROVLYSSNA 5 S"; testBtn.disabled = false; };
+  a.onended = finish; a.onerror = finish;
+  try { await a.play(); } catch (e) { finish(); }
+}
+testBtn.addEventListener("click", testListen);
 
 // ---------- Tryck för att prata (håll mellanslag) ----------
 const pttOn = $("pttOn");
 let pttHeld = false;
 try { pttOn.checked = localStorage.getItem("demonrosten-ptt") === "1"; } catch (e) {}
-function talkOpen(){ return !pttOn.checked || pttHeld; }
+function talkOpen(){ return testing || !pttOn.checked || pttHeld; }
 function setTalk(held){
   if (pttHeld === held) return;
   pttHeld = held;
@@ -836,6 +943,8 @@ $("modes").addEventListener("click", e => {
   $("depthLabel").textContent = m.depthLabel;
   depthEl.value = m.depthDef; $("depthOut").textContent = m.depthDef + " %";
   echoEl.value = m.echoDef;  $("echoOut").textContent = m.echoDef + " %";
+  if (m.klangDef != null){ klangEl.value = m.klangDef; $("klangOut").textContent = m.klangDef + " %"; }
+  showVoiceInfo();
   applyParams();
   buildBoard();
   fillVoiceSel();
