@@ -289,8 +289,9 @@ const MODES = {
     target: d => 170 + (d / 100) * 90,            // måltonläge 170 -> 260 Hz (kvinnligt register)
     formant: k => 1.05 + (k / 100) * 0.30,        // klang 1.05 -> 1.35, eget reglage
     klangDef: 45,
-    tts: { lang: "sv", female: true, pitch: d => 1.1 + (d / 100) * 0.9, rate: 0.92,
-           fx: (d, k) => ({ ratio: 0.95 + (d / 100) * 0.2, formant: 1 + ((k - 45) / 100) * 0.2 }) },
+    tts: { lang: "sv", female: true, pitch: d => 1.1 + (d / 100) * 0.9, rate: 0.84,
+           // långsammare, lite mörkare och närmare: 50 % tonläge ger 0.95, 45 % klang ger 0.97
+           fx: (d, k) => ({ ratio: 0.85 + (d / 100) * 0.2, formant: 0.97 + ((k - 45) / 100) * 0.2 }) },
     phrases: [
       "Hej du … jag hoppades att det var du.",
       "Vilken röst du har. Säg nåt mer.",
@@ -596,9 +597,13 @@ function liveFx(m){
 }
 // Förvrängning för snackbrädans röst (den är redan man/kvinna, så vissa lägen behöver mindre)
 function boardFx(m){
-  if (m.tts.fx) return m.tts.fx(+depthEl.value, +klangEl.value);
-  const fx = liveFx(m);
+  const fx = m.tts.fx ? m.tts.fx(+depthEl.value, +klangEl.value) : liveFx(m);
   fx.target = 0;
+  // Repliken spelas i lägets taltempo (m.tts.rate). Det sänker eller höjer tonen lika mycket,
+  // så förvrängaren får lyfta tillbaka den: tempot ändras utan att rösten byter tonläge.
+  const rate = m.tts.rate || 1;
+  fx.ratio = fx.ratio / rate;
+  if (fx.formant) fx.formant = fx.formant / rate;
   return fx;
 }
 function applyParams(){
@@ -1023,6 +1028,7 @@ async function sayNeural(text){
     if (ttsSource){ try { ttsSource.stop(); } catch (e) {} }
     const s = ctx.createBufferSource();
     s.buffer = buf;
+    s.playbackRate.value = m.tts.rate || 1;
     s.connect(ttsNode);
     s.start();
     ttsSource = s;
