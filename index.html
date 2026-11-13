@@ -123,6 +123,9 @@ select:focus-visible{outline:2px solid var(--blood);outline-offset:1px}
   color:var(--fg);background:#201a2e;border:1px solid var(--line);border-radius:12px;padding:12px;width:100%;
 }
 .voicerow input:focus-visible{outline:2px solid var(--blood);outline-offset:1px}
+.ptt{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--dim);cursor:pointer}
+.ptt input{width:20px;height:20px;flex:0 0 auto;accent-color:var(--blood);margin:0}
+.ptt b{color:var(--fg)}
 details{border:1px solid var(--line);border-radius:12px;padding:10px 12px}
 details summary{cursor:pointer;font-size:13px;color:var(--dim);font-weight:600}
 details[open] summary{margin-bottom:10px}
@@ -163,6 +166,10 @@ footer{font-size:12px;color:var(--dim);text-align:center}
     </div>
     <p id="err"></p>
     <div id="meter" aria-hidden="true"><div id="meterFill"></div></div>
+    <label class="ptt" for="pttOn">
+      <input type="checkbox" id="pttOn">
+      <span>Tryck för att prata: micken är tyst tills du håller <b>mellanslag</b>. Stoppar eko i samtal.</span>
+    </label>
     <details id="devSetup">
       <summary>Ljudenheter (för samtal via datorn)</summary>
       <div class="voicerow">
@@ -264,8 +271,8 @@ const MODES = {
     ]
   },
   dam: {
-    depthLabel: "Tonhöjd", depthDef: 60, echoDef: 8, phone: false,
-    ratio: d => 1.05 + (d / 100) * 0.45,          // uppåt: 1.05 -> 1.50
+    depthLabel: "Tonhöjd", depthDef: 35, echoDef: 8, phone: false,
+    ratio: d => 1.05 + (d / 100) * 0.30,          // uppåt: 1.05 -> 1.35 (högre blir smurf)
     tts: { lang: "sv", female: true, pitch: d => 1.1 + (d / 100) * 0.9, rate: 0.92 },
     phrases: [
       "Hej du … jag hoppades att det var du.",
@@ -405,6 +412,7 @@ registerProcessor("pitch-shifter", PitchShifter);
 function setStatus(){
   if (!ctx){ statusPill.textContent = "AV"; statusPill.className = "pill"; }
   else if (panicMuted){ statusPill.textContent = "MUTAD"; statusPill.className = "pill muted"; }
+  else if (!talkOpen()){ statusPill.textContent = "TYST"; statusPill.className = "pill muted"; }
   else { statusPill.textContent = "LIVE"; statusPill.className = "pill live"; }
 }
 
@@ -418,7 +426,7 @@ function applyParams(){
     c.worklet.parameters.get("ringFreq").setTargetAtTime(m.ring ? m.ring.freq : 0, t, 0.03);
     c.worklet.parameters.get("ringDepth").setTargetAtTime(m.ring ? m.ring.depth : 0, t, 0.03);
     c.echoGain.gain.setTargetAtTime((+echoEl.value / 100) * 0.55, t, 0.03);
-    c.volGain.gain.setTargetAtTime(+volEl.value / 100, t, 0.03);
+    c.volGain.gain.setTargetAtTime(talkOpen() ? +volEl.value / 100 : 0, t, 0.02);
     c.hp.frequency.setTargetAtTime(m.phone ? 300 : 20, t, 0.03);
     c.lp.frequency.setTargetAtTime(m.phone ? 3200 : 20000, t, 0.03);
   }
@@ -535,6 +543,32 @@ panicBtn.addEventListener("click", () => {
 for (const [el, out] of [[depthEl, "depthOut"], [echoEl, "echoOut"], [volEl, "volOut"]]){
   el.addEventListener("input", () => { $(out).textContent = el.value + " %"; applyParams(); });
 }
+
+// ---------- Tryck för att prata (håll mellanslag) ----------
+const pttOn = $("pttOn");
+let pttHeld = false;
+try { pttOn.checked = localStorage.getItem("demonrosten-ptt") === "1"; } catch (e) {}
+function talkOpen(){ return !pttOn.checked || pttHeld; }
+function setTalk(held){
+  if (pttHeld === held) return;
+  pttHeld = held;
+  applyParams();
+  setStatus();
+}
+pttOn.addEventListener("change", () => {
+  try { localStorage.setItem("demonrosten-ptt", pttOn.checked ? "1" : "0"); } catch (e) {}
+  pttHeld = false;
+  applyParams();
+  setStatus();
+});
+document.addEventListener("keydown", e => {
+  if (e.code !== "Space" || !pttOn.checked) return;
+  if (e.target.tagName === "INPUT" && e.target.type !== "range" && e.target.type !== "checkbox") return;
+  e.preventDefault();
+  setTalk(true);
+});
+document.addEventListener("keyup", e => { if (e.code === "Space") { if (pttOn.checked) e.preventDefault(); setTalk(false); } });
+window.addEventListener("blur", () => setTalk(false));
 
 // ---------- Ljudenheter (mikrofon + utgång, t.ex. virtuell kabel till Phone Link) ----------
 const micSel = $("micSel"), outSel = $("outSel");
