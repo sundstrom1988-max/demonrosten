@@ -205,7 +205,11 @@ footer{font-size:12px;color:var(--dim);text-align:center}
 
   <section class="card">
     <h2>Snackbrädan</h2>
-    <div class="voicerow">
+    <label class="ptt" for="neuralOn">
+      <input type="checkbox" id="neuralOn">
+      <span>Riktiga röster (man och kvinna) som går genom förvrängaren och in i samtalet. Första gången laddas ungefär 90 MB ner, sedan 60 MB per röst.</span>
+    </label>
+    <div class="voicerow" id="sysVoiceRow">
       <label for="voiceSel">Röst för detta läge</label>
       <select id="voiceSel"></select>
     </div>
@@ -213,8 +217,9 @@ footer{font-size:12px;color:var(--dim);text-align:center}
       <input id="customText" placeholder="Skriv en egen replik …" maxlength="200" autocomplete="off">
       <button id="sayBtn">SÄG DET</button>
     </div>
+    <p class="hint" id="ttsStatus"></p>
     <div class="board" id="board"></div>
-    <p class="hint">Replikerna läses av mobilens talsyntes i valt röstläge — djup-reglaget styr tonläget även här. Obs: på en dator ignorerar Windows-rösterna ofta tonläget helt, så testa på mobilen innan du dömer.</p>
+    <p class="hint">Med riktiga röster läser en svensk man eller kvinna repliken, och röstläget förvränger den precis som din egen röst. Första gången en replik sägs tar det några sekunder, sedan är den sparad. Utan bocken används enhetens egen talsyntes, och på en dator låter den likadant i alla lägen.</p>
   </section>
 
   <section class="card">
@@ -261,7 +266,8 @@ const MODES = {
   demon: {
     depthLabel: "Demondjup", depthDef: 70, echoDef: 25, phone: false,
     ratio: d => 0.95 - (d / 100) * 0.50,          // neråt: 0.95 -> 0.45
-    tts: { lang: "sv", female: false, pitch: d => 0.8 - (d / 100) * 0.7, rate: 0.85 },
+    tts: { lang: "sv", female: false, pitch: d => 0.8 - (d / 100) * 0.7, rate: 0.85,
+           fx: d => ({ ratio: 1.0 - (d / 100) * 0.35 }) },
     phrases: [
       "Hallå …?",
       "Jag vet vad du gjorde i somras.",
@@ -283,7 +289,8 @@ const MODES = {
     target: d => 170 + (d / 100) * 90,            // måltonläge 170 -> 260 Hz (kvinnligt register)
     formant: k => 1.05 + (k / 100) * 0.30,        // klang 1.05 -> 1.35, eget reglage
     klangDef: 45,
-    tts: { lang: "sv", female: true, pitch: d => 1.1 + (d / 100) * 0.9, rate: 0.92 },
+    tts: { lang: "sv", female: true, pitch: d => 1.1 + (d / 100) * 0.9, rate: 0.92,
+           fx: (d, k) => ({ ratio: 0.95 + (d / 100) * 0.2, formant: 1 + ((k - 45) / 100) * 0.2 }) },
     phrases: [
       "Hej du … jag hoppades att det var du.",
       "Vilken röst du har. Säg nåt mer.",
@@ -317,7 +324,8 @@ const MODES = {
   gubbe: {
     depthLabel: "Surhet", depthDef: 50, echoDef: 5, phone: false,
     ratio: d => 0.95 - (d / 100) * 0.25,          // lite ner: sur, inte demon
-    tts: { lang: "sv", female: false, pitch: d => 0.85 - (d / 100) * 0.35, rate: 0.8 },
+    tts: { lang: "sv", female: false, pitch: d => 0.85 - (d / 100) * 0.35, rate: 0.8,
+           fx: d => ({ ratio: 1.05 - (d / 100) * 0.2 }) },
     phrases: [
       "Vem är det som ringer mitt i Rapport?!",
       "Va? VA? Tala högre!",
@@ -347,7 +355,8 @@ const MODES = {
     depthLabel: "Rost", depthDef: 50, echoDef: 10, phone: false,
     ratio: d => 0.85 - (d / 100) * 0.20,
     ring: { freq: 35, depth: 0.85 },              // ringmodulator = Dalek
-    tts: { lang: "sv", female: false, pitch: d => 0.7 - (d / 100) * 0.3, rate: 0.7 },
+    tts: { lang: "sv", female: false, pitch: d => 0.7 - (d / 100) * 0.3, rate: 0.7,
+           fx: d => ({ ratio: 1.0 - (d / 100) * 0.15, ringFreq: 35, ringDepth: 0.85 }) },
     phrases: [
       "JAG. ÄR. INTE. EN. ROBOT.",
       "DITT SAMTAL. SPELAS IN. FÖR EVIGT.",
@@ -363,6 +372,7 @@ let mode = "demon";
 // ---------- Live-rösten (Web Audio + AudioWorklet-pitchshifter) ----------
 let ctx = null, workletNode = null, panicMuted = false, testing = false, voiceStat = null;
 let echoGain = null, volGain = null, panicGain = null, analyser = null;
+let micGate = null, ttsNode = null, monitorEl = null, enginePromise = null;
 let hpFilter = null, lpFilter = null, rafId = 0, wakeLock = null;
 
 const WORKLET_SRC = `
@@ -562,7 +572,7 @@ registerProcessor("pitch-shifter", PitchShifter);
 `;
 
 function setStatus(){
-  if (!ctx){ statusPill.textContent = "AV"; statusPill.className = "pill"; }
+  if (!ctx || !ctx._stream){ statusPill.textContent = "AV"; statusPill.className = "pill"; }
   else if (panicMuted){ statusPill.textContent = "MUTAD"; statusPill.className = "pill muted"; }
   else if (!talkOpen()){ statusPill.textContent = "TYST"; statusPill.className = "pill muted"; }
   else { statusPill.textContent = "LIVE"; statusPill.className = "pill live"; }
@@ -570,29 +580,96 @@ function setStatus(){
 
 // Alla aktiva ljudkedjor (lokal högtalare + ev. pågående samtal) styrs av samma reglage
 const chains = [];
+function setFx(node, fx, t){
+  const p = node.parameters;
+  p.get("ratio").setTargetAtTime(fx.ratio, t, 0.03);
+  p.get("formant").setValueAtTime(fx.formant || 0, t);
+  p.get("target").setValueAtTime(fx.target || 0, t);
+  p.get("ringFreq").setTargetAtTime(fx.ringFreq || 0, t, 0.03);
+  p.get("ringDepth").setTargetAtTime(fx.ringDepth || 0, t, 0.03);
+}
+// Förvrängning för din egen röst i valt läge
+function liveFx(m){
+  const d = +depthEl.value;
+  return { ratio: m.ratio(d), formant: m.formant ? m.formant(+klangEl.value) : 0, target: m.target ? m.target(d) : 0,
+           ringFreq: m.ring ? m.ring.freq : 0, ringDepth: m.ring ? m.ring.depth : 0 };
+}
+// Förvrängning för snackbrädans röst (den är redan man/kvinna, så vissa lägen behöver mindre)
+function boardFx(m){
+  if (m.tts.fx) return m.tts.fx(+depthEl.value, +klangEl.value);
+  const fx = liveFx(m);
+  fx.target = 0;
+  return fx;
+}
 function applyParams(){
   const m = MODES[mode];
   for (const c of chains){
     const t = c.ctx.currentTime;
-    c.worklet.parameters.get("ratio").setTargetAtTime(m.ratio(+depthEl.value), t, 0.03);
-    c.worklet.parameters.get("formant").setValueAtTime(m.formant ? m.formant(+klangEl.value) : 0, t);
-    c.worklet.parameters.get("target").setValueAtTime(m.target ? m.target(+depthEl.value) : 0, t);
-    c.worklet.parameters.get("ringFreq").setTargetAtTime(m.ring ? m.ring.freq : 0, t, 0.03);
-    c.worklet.parameters.get("ringDepth").setTargetAtTime(m.ring ? m.ring.depth : 0, t, 0.03);
+    setFx(c.worklet, liveFx(m), t);
+    if (c.tts) setFx(c.tts, boardFx(m), t);
     c.echoGain.gain.setTargetAtTime((+echoEl.value / 100) * 0.55, t, 0.03);
-    c.volGain.gain.setTargetAtTime(talkOpen() ? +volEl.value / 100 : 0, t, 0.02);
+    c.micGate.gain.setTargetAtTime(talkOpen() ? 1 : 0, t, 0.02);
+    c.volGain.gain.setTargetAtTime(+volEl.value / 100, t, 0.02);
     c.hp.frequency.setTargetAtTime(m.phone ? 300 : 20, t, 0.03);
     c.lp.frequency.setTargetAtTime(m.phone ? 3200 : 20000, t, 0.03);
   }
 }
 
+// Motorn (ljudkedjan) kan köra utan mick, t.ex. när bara snackbrädan används
+function ensureEngine(){
+  if (!enginePromise) enginePromise = buildEngine().catch(e => { enginePromise = null; throw e; });
+  return enginePromise;
+}
+async function buildEngine(){
+  const c = new AudioContext({ latencyHint: "interactive" });
+  const blobUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
+  await c.audioWorklet.addModule(blobUrl);
+  URL.revokeObjectURL(blobUrl);
+  ctx = c;
+  workletNode = new AudioWorkletNode(ctx, "pitch-shifter");
+  workletNode.port.onmessage = e => { voiceStat = e.data; showVoiceInfo(); };
+  ttsNode = new AudioWorkletNode(ctx, "pitch-shifter");
+  micGate = ctx.createGain(); micGate.gain.value = 0;
+  micGate.connect(workletNode);
+
+  // Eko-loop (delas av mick och snackbräda)
+  const delay = ctx.createDelay(1); delay.delayTime.value = 0.17;
+  echoGain = ctx.createGain();
+  delay.connect(echoGain); echoGain.connect(delay);
+  const mix = ctx.createGain();
+  echoGain.connect(mix);
+  for (const n of [workletNode, ttsNode]){ n.connect(delay); n.connect(mix); }
+
+  hpFilter = ctx.createBiquadFilter(); hpFilter.type = "highpass"; hpFilter.frequency.value = 20;
+  lpFilter = ctx.createBiquadFilter(); lpFilter.type = "lowpass"; lpFilter.frequency.value = 20000;
+  volGain = ctx.createGain();
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -18; comp.ratio.value = 8;
+  panicGain = ctx.createGain();
+  analyser = ctx.createAnalyser(); analyser.fftSize = 512;
+  mix.connect(hpFilter); hpFilter.connect(lpFilter); lpFilter.connect(volGain);
+  volGain.connect(comp); comp.connect(panicGain);
+  panicGain.connect(analyser); panicGain.connect(ctx.destination);
+
+  // Medhörning: snackbrädans röst hörs i dina egna högtalare när ljudet annars går till kabeln
+  const mon = ctx.createMediaStreamDestination();
+  ttsNode.connect(mon);
+  monitorEl = new Audio();
+  monitorEl.srcObject = mon.stream;
+  monitorEl.volume = 0.7;
+
+  ctx._chain = { ctx, worklet: workletNode, tts: ttsNode, micGate, echoGain, volGain, hp: hpFilter, lp: lpFilter, panicGain };
+  chains.push(ctx._chain);
+  applyParams();
+  meterLoop();
+  await applySink();
+}
+
 async function start(){
   errEl.style.display = "none";
   try {
-    ctx = new AudioContext({ latencyHint: "interactive" });
-    const blobUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
-    await ctx.audioWorklet.addModule(blobUrl);
-    URL.revokeObjectURL(blobUrl);
+    await ensureEngine();
+    if (ctx.state === "suspended") await ctx.resume();
     const base = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
     let stream = null;
     if (devChoice.mic){
@@ -603,42 +680,14 @@ async function start(){
       }
     }
     if (!stream) stream = await navigator.mediaDevices.getUserMedia({ audio: base });
-    const src = ctx.createMediaStreamSource(stream);
-    workletNode = new AudioWorkletNode(ctx, "pitch-shifter");
-    workletNode.port.onmessage = e => { voiceStat = e.data; showVoiceInfo(); };
-
-    // Eko-loop
-    const delay = ctx.createDelay(1); delay.delayTime.value = 0.17;
-    echoGain = ctx.createGain();
-    workletNode.connect(delay); delay.connect(echoGain); echoGain.connect(delay);
-
-    const mix = ctx.createGain();
-    workletNode.connect(mix); echoGain.connect(mix);
-
-    hpFilter = ctx.createBiquadFilter(); hpFilter.type = "highpass"; hpFilter.frequency.value = 20;
-    lpFilter = ctx.createBiquadFilter(); lpFilter.type = "lowpass"; lpFilter.frequency.value = 20000;
-
-    volGain = ctx.createGain();
-    const comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = -18; comp.ratio.value = 8;
-    panicGain = ctx.createGain();
-    analyser = ctx.createAnalyser(); analyser.fftSize = 512;
-
-    src.connect(workletNode);
-    mix.connect(hpFilter); hpFilter.connect(lpFilter); lpFilter.connect(volGain);
-    volGain.connect(comp); comp.connect(panicGain);
-    panicGain.connect(analyser); panicGain.connect(ctx.destination);
-
-    ctx._chain = { ctx, worklet: workletNode, echoGain, volGain, hp: hpFilter, lp: lpFilter, panicGain };
-    chains.push(ctx._chain);
+    ctx.createMediaStreamSource(stream).connect(micGate);
+    ctx._stream = stream;
     applyParams();
     powerBtn.textContent = "STÄNG AV";
     powerBtn.classList.add("on");
     panicBtn.hidden = false;
-    meterLoop();
     setStatus();
     try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (e) {}
-    ctx._stream = stream;
     fillDevices();
     applySink();
   } catch (e) {
@@ -662,7 +711,9 @@ function stop(){
     try { ctx.close(); } catch (e) {}
   }
   try { wakeLock?.release(); } catch (e) {}
-  ctx = null; workletNode = null; wakeLock = null; panicMuted = false;
+  if (monitorEl){ try { monitorEl.pause(); monitorEl.srcObject = null; } catch (e) {} }
+  ctx = null; workletNode = null; ttsNode = null; micGate = null; monitorEl = null; enginePromise = null;
+  wakeLock = null; panicMuted = false;
   powerBtn.textContent = "STARTA MICKEN";
   powerBtn.classList.remove("on");
   panicBtn.hidden = !activeCall;
@@ -685,7 +736,7 @@ function meterLoop(){
   rafId = requestAnimationFrame(tick);
 }
 
-powerBtn.addEventListener("click", () => { ctx ? stop() : start(); });
+powerBtn.addEventListener("click", () => { ctx && ctx._stream ? stop() : start(); });
 panicBtn.addEventListener("click", () => {
   if (!chains.length) return;
   panicMuted = !panicMuted;
@@ -736,8 +787,9 @@ function medianF0(x, sr){
 const testBtn = $("testBtn");
 async function testListen(){
   if (testing) return;
-  if (!ctx){ errEl.textContent = "Starta micken först."; errEl.style.display = "block"; return; }
   errEl.style.display = "none";
+  try { await ensureEngine(); if (ctx.state === "suspended") await ctx.resume(); }
+  catch (e) { errEl.textContent = "Kunde inte starta ljudet: " + (e.message || e.name || e); errEl.style.display = "block"; return; }
   testing = true;
   testBtn.disabled = true;
   const dest = ctx.createMediaStreamDestination();
@@ -833,7 +885,13 @@ async function fillDevices(){
   }
 }
 
+function syncMonitor(){
+  if (!monitorEl) return;
+  if (devChoice.out && sinkSupported) monitorEl.play().catch(() => {});
+  else monitorEl.pause();
+}
 async function applySink(){
+  syncMonitor();
   if (!ctx || !sinkSupported) return;
   try { await ctx.setSinkId(devChoice.out || ""); }
   catch (e) {
@@ -906,7 +964,84 @@ voiceSel.addEventListener("change", () => {
   try { localStorage.setItem("demonrosten-voices", JSON.stringify(voiceChoice)); } catch (e) {}
 });
 
+// ---------- Riktiga röster (Piper, körs helt i webbläsaren) ----------
+const NEURAL = { male: "sv_SE-nst-medium", female: "sv_SE-alma-medium", en: "en_GB-alan-medium" };
+const neuralEl = $("neuralOn"), ttsStatus = $("ttsStatus");
+let ttsLib = null, ttsBusy = false, ttsSource = null;
+{
+  const android = /Android/i.test(navigator.userAgent);
+  let saved = null;
+  try { saved = localStorage.getItem("demonrosten-neural"); } catch (e) {}
+  neuralEl.checked = saved === null ? !android : saved === "1";
+  $("sysVoiceRow").hidden = neuralEl.checked;
+}
+neuralEl.addEventListener("change", () => {
+  try { localStorage.setItem("demonrosten-neural", neuralEl.checked ? "1" : "0"); } catch (e) {}
+  $("sysVoiceRow").hidden = neuralEl.checked;
+  ttsStatus.textContent = "";
+});
+function loadTts(){
+  if (!ttsLib) ttsLib = import("https://cdn.jsdelivr.net/npm/@diffusionstudio/vits-web@1.0.3/+esm").then(t => {
+    // Kvinnorösten finns inte i paketets lista: peka den mot rhasspy/piper-voices
+    t.PATH_MAP["sv_SE-alma-medium"] = "../../../../rhasspy/piper-voices/resolve/main/sv/sv_SE/alma/medium/sv_SE-alma-medium.onnx";
+    return t;
+  }).catch(e => { ttsLib = null; throw e; });
+  return ttsLib;
+}
+// En färdig replik sparas i webbläsaren, så den bara behöver skapas en gång
+async function wavFor(text, voiceId){
+  const key = "https://tts.invalid/" + voiceId + "/" + encodeURIComponent(text);
+  let cache = null;
+  try {
+    cache = await caches.open("demonrosten-tts-v1");
+    const hit = await cache.match(key);
+    if (hit) return await hit.arrayBuffer();
+  } catch (e) {}
+  ttsStatus.textContent = "Hämtar röstmotorn …";
+  const t = await loadTts();
+  if (!(voiceId in t.PATH_MAP)) throw new Error("rösten " + voiceId + " saknas");
+  ttsStatus.textContent = "Skapar repliken …";
+  await new Promise(r => setTimeout(r, 40));
+  const blob = await t.predict({ text, voiceId }, p => {
+    if (p && p.total) ttsStatus.textContent = "Laddar ner rösten … " + Math.round(100 * p.loaded / p.total) + " %";
+  });
+  const buf = await blob.arrayBuffer();
+  try { if (cache) await cache.put(key, new Response(buf.slice(0), { headers: { "Content-Type": "audio/wav" } })); } catch (e) {}
+  return buf;
+}
+async function sayNeural(text){
+  if (ttsBusy) return;
+  ttsBusy = true;
+  const m = MODES[mode];
+  try {
+    await ensureEngine();
+    if (ctx.state === "suspended") await ctx.resume();
+    const voiceId = m.tts.lang === "en" ? NEURAL.en : (m.tts.female ? NEURAL.female : NEURAL.male);
+    const wav = await wavFor(text, voiceId);
+    if (!ctx) return;
+    const buf = await ctx.decodeAudioData(wav);
+    if (ttsSource){ try { ttsSource.stop(); } catch (e) {} }
+    const s = ctx.createBufferSource();
+    s.buffer = buf;
+    s.connect(ttsNode);
+    s.start();
+    ttsSource = s;
+    syncMonitor();
+    ttsStatus.textContent = devChoice.out && sinkSupported ? "Spelas in i samtalet och i dina högtalare." : "";
+    s.onended = () => { if (ttsSource === s){ ttsSource = null; ttsStatus.textContent = ""; } };
+  } catch (e) {
+    ttsStatus.textContent = "Riktiga rösten gick inte att starta (" + (e.message || e.name || e) + "). Använder enhetens röst.";
+    saySystem(text);
+  } finally {
+    ttsBusy = false;
+  }
+}
 function say(text){
+  if (!text.trim()) return;
+  if (neuralEl.checked) sayNeural(text); else saySystem(text);
+}
+
+function saySystem(text){
   if (!("speechSynthesis" in window) || !text.trim()) return;
   const m = MODES[mode];
   speechSynthesis.cancel();
@@ -1004,9 +1139,9 @@ const demonProcessor = {
     const comp = actx.createDynamicsCompressor(); comp.threshold.value = -18; comp.ratio.value = 8;
     const pg = actx.createGain();
     const dest = actx.createMediaStreamDestination();
-    src.connect(node);
+    const gate = actx.createGain(); src.connect(gate); gate.connect(node);
     mix.connect(hp); hp.connect(lp); lp.connect(vg); vg.connect(comp); comp.connect(pg); pg.connect(dest);
-    this._chain = { ctx: actx, worklet: node, echoGain: eg, volGain: vg, hp, lp, panicGain: pg };
+    this._chain = { ctx: actx, worklet: node, micGate: gate, echoGain: eg, volGain: vg, hp, lp, panicGain: pg };
     chains.push(this._chain);
     applyParams();
     return dest.stream;
