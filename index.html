@@ -271,8 +271,9 @@ const MODES = {
     ]
   },
   dam: {
-    depthLabel: "Tonhöjd", depthDef: 35, echoDef: 8, phone: false,
-    ratio: d => 1.05 + (d / 100) * 0.30,          // uppåt: 1.05 -> 1.35 (högre blir smurf)
+    depthLabel: "Tonhöjd", depthDef: 50, echoDef: 8, phone: false,
+    ratio: d => 1.45 + (d / 100) * 0.50,          // tonhöjd upp: 1.45 -> 1.95 (man -> kvinnligt läge)
+    formant: d => 1.12 + (d / 100) * 0.12,        // klangen lyfts bara lite: 1.12 -> 1.24
     tts: { lang: "sv", female: true, pitch: d => 1.1 + (d / 100) * 0.9, rate: 0.92 },
     phrases: [
       "Hej du … jag hoppades att det var du.",
@@ -356,10 +357,15 @@ let echoGain = null, volGain = null, panicGain = null, analyser = null;
 let hpFilter = null, lpFilter = null, rafId = 0, wakeLock = null;
 
 const WORKLET_SRC = `
+// Två motorer i samma processor:
+//  - formant = 0: enkel granulär tonhöjning (klangen följer med tonen)
+//  - formant > 0: PSOLA. Tonhöjd (ratio) och klang (formant) styrs var för sig,
+//    så en mansröst kan lyftas till kvinnligt tonläge utan att bli smurf.
 class PitchShifter extends AudioWorkletProcessor {
   static get parameterDescriptors(){
     return [
-      {name:"ratio", defaultValue:0.6, minValue:0.3, maxValue:1.6, automationRate:"k-rate"},
+      {name:"ratio", defaultValue:0.6, minValue:0.3, maxValue:2.4, automationRate:"k-rate"},
+      {name:"formant", defaultValue:0, minValue:0, maxValue:2, automationRate:"k-rate"},
       {name:"ringFreq", defaultValue:0, minValue:0, maxValue:200, automationRate:"k-rate"},
       {name:"ringDepth", defaultValue:0, minValue:0, maxValue:1, automationRate:"k-rate"}
     ];
@@ -368,41 +374,152 @@ class PitchShifter extends AudioWorkletProcessor {
     super();
     this.N = 1 << 15;
     this.buf = new Float32Array(this.N);
-    this.w = 0;
+    this.n = 0;                       // absolut sampelräknare (skrivposition = n mod N)
     this.phase = 0;
     this.rp = 0;
     this.grain = Math.round(0.09 * sampleRate);
+    // PSOLA-utgång (overlap-add)
+    this.M = 1 << 13;
+    this.ola = new Float32Array(this.M);
+    this.lat = Math.ceil(2.2 * sampleRate / 70);
+    this.nc = 0; this.sPrev = -1; this.prevVoiced = false; this.psolaN = -1;
+    // Grundtonsdetektor (YIN) på nedsamplad signal
+    this.D = Math.max(1, Math.round(sampleRate / 12000));
+    this.srd = sampleRate / this.D;
+    this.maxLag = Math.ceil(this.srd / 70);
+    this.minLag = Math.floor(this.srd / 400);
+    this.W = Math.round(0.025 * this.srd);
+    this.dN = 1024;
+    this.dbuf = new Float32Array(this.dN);
+    this.dw = 0; this.dacc = 0; this.dcnt = 0;
+    this.tmp = new Float32Array(this.W + this.maxLag + 1);
+    this.df = new Float32Array(this.maxLag + 2);
+    this.hop = 0;
+    this.hopLen = Math.round(0.01 * sampleRate);
+    this.P = sampleRate / 120;        // senast kända period i sampel
+    this.voiced = false;
   }
   read(pos){
-    const N = this.N;
-    pos = ((pos % N) + N) % N;
-    const i0 = pos | 0, i1 = (i0 + 1) % N, fr = pos - i0;
-    return this.buf[i0] * (1 - fr) + this.buf[i1] * fr;
+    const N1 = this.N - 1;
+    const i0 = Math.floor(pos), fr = pos - i0;
+    const a = this.buf[i0 & N1], b = this.buf[(i0 + 1) & N1];
+    return a + (b - a) * fr;
+  }
+  detect(){
+    const W = this.W, maxLag = this.maxLag, minLag = this.minLag, L = W + maxLag;
+    const x = this.tmp, dN = this.dN, df = this.df;
+    for (let j = 0; j < L; j++) x[j] = this.dbuf[(this.dw - L + j + 2 * dN) % dN];
+    let e = 0;
+    for (let j = 0; j < W; j++) e += x[j] * x[j];
+    if (e / W < 1e-7){ this.voiced = false; return; }
+    let cum = 0;
+    for (let tau = 1; tau <= maxLag; tau++){
+      let s = 0;
+      for (let j = 0; j < W; j++){ const d = x[j] - x[j + tau]; s += d * d; }
+      cum += s;
+      df[tau] = cum > 0 ? s * tau / cum : 1;
+    }
+    let best = minLag, picked = -1;
+    for (let tau = minLag; tau <= maxLag; tau++) if (df[tau] < df[best]) best = tau;
+    for (let tau = minLag; tau < maxLag; tau++){
+      if (df[tau] < 0.15){
+        while (tau + 1 <= maxLag && df[tau + 1] < df[tau]) tau++;
+        picked = tau; break;
+      }
+    }
+    if (picked < 0) picked = best;
+    if (df[picked] > 0.3){ this.voiced = false; return; }
+    let t = picked;
+    if (picked > 1 && picked < maxLag){
+      const a = df[picked - 1], b = df[picked], c = df[picked + 1], den = a - 2 * b + c;
+      if (den > 1e-12) t = picked + 0.5 * (a - c) / den;
+    }
+    this.P = t * this.D;
+    this.voiced = true;
+  }
+  placeGrain(r, f){
+    const P = this.P, N1 = this.N - 1, M1 = this.M - 1;
+    const h = P / f;                  // halva kornlängden i utsampel (två perioder källjud)
+    const c = this.nc;
+    const target = c - this.lat;
+    let s = target;
+    if (this.voiced && this.prevVoiced && this.sPrev >= 0 && Math.abs(target - this.sPrev) < 4 * P){
+      // Tonande ljud: hoppa hela perioder från förra kornet så att fasen hänger ihop
+      const k = Math.floor((target - this.sPrev) / P);
+      if (k <= 0) s = this.sPrev;
+      else {
+        const a0 = Math.round(this.sPrev), c0 = Math.round(this.sPrev + k * P);
+        const R = Math.max(4, Math.round(P / 16)), half = Math.round(P / 2);
+        let bestC = -1e30, bestD = 0;
+        for (let d = -R; d <= R; d++){
+          let acc = 0;
+          for (let j = -half; j <= half; j += 2) acc += this.buf[(a0 + j) & N1] * this.buf[(c0 + d + j) & N1];
+          if (acc > bestC){ bestC = acc; bestD = d; }
+        }
+        s = c0 + bestD + (this.sPrev - a0);
+      }
+    }
+    const maxS = this.n - 2 - P;
+    if (s > maxS) s = maxS;
+    const g = Math.min(1, f / r);
+    const i0 = Math.max(this.n, Math.ceil(c - h)), i1 = Math.floor(c + h);
+    for (let i = i0; i <= i1; i++){
+      const tau = i - c;
+      this.ola[i & M1] += 0.5 * (1 + Math.cos(Math.PI * tau / h)) * g * this.read(s + tau * f);
+    }
+    this.sPrev = s;
+    this.prevVoiced = this.voiced;
+    this.nc = c + P / r;
   }
   process(inputs, outputs, params){
     const inp = inputs[0] && inputs[0][0];
     const out = outputs[0] && outputs[0][0];
     if (!out) return true;
     if (!inp){ out.fill(0); return true; }
-    const g = this.grain, r = params.ratio[0];
+    const g = this.grain, r = params.ratio[0], fm = params.formant[0];
     const rf = params.ringFreq[0], rd = params.ringDepth[0];
     const rstep = 2 * Math.PI * rf / sampleRate;
+    const N1 = this.N - 1, M1 = this.M - 1;
+    const psola = fm >= 0.5;
+    if (psola && this.psolaN !== this.n){
+      this.ola.fill(0);
+      this.nc = this.n + this.P;
+      this.sPrev = -1; this.prevVoiced = false;
+    }
     for (let i = 0; i < inp.length; i++){
-      this.buf[this.w] = inp[i];
-      this.phase += (1 - r);
-      if (this.phase >= g) this.phase -= g;
-      if (this.phase < 0) this.phase += g;
-      const d1 = this.phase, d2 = (this.phase + g / 2) % g;
-      const g1 = Math.sin(Math.PI * d1 / g), g2 = Math.sin(Math.PI * d2 / g);
-      let s = this.read(this.w - d1) * g1 + this.read(this.w - d2) * g2;
+      const x = inp[i];
+      this.buf[this.n & N1] = x;
+      let s;
+      if (psola){
+        this.dacc += x;
+        if (++this.dcnt >= this.D){
+          this.dbuf[this.dw] = this.dacc / this.D;
+          this.dw = (this.dw + 1) % this.dN;
+          this.dacc = 0; this.dcnt = 0;
+        }
+        if (++this.hop >= this.hopLen){ this.hop = 0; this.detect(); }
+        let guard = 0;
+        while (this.nc - this.P / fm <= this.n + 1 && guard++ < 8) this.placeGrain(r, fm);
+        const m = this.n & M1;
+        s = this.ola[m];
+        this.ola[m] = 0;
+      } else {
+        this.phase += (1 - r);
+        if (this.phase >= g) this.phase -= g;
+        if (this.phase < 0) this.phase += g;
+        const d1 = this.phase, d2 = (this.phase + g / 2) % g;
+        const g1 = Math.sin(Math.PI * d1 / g), g2 = Math.sin(Math.PI * d2 / g);
+        s = this.read(this.n - d1) * g1 + this.read(this.n - d2) * g2;
+      }
       if (rd > 0){
         s *= (1 - rd) + rd * Math.sin(this.rp);
         this.rp += rstep;
         if (this.rp > 2 * Math.PI) this.rp -= 2 * Math.PI;
       }
       out[i] = s;
-      this.w = (this.w + 1) % this.N;
+      this.n++;
     }
+    if (psola) this.psolaN = this.n;
     return true;
   }
 }
@@ -423,6 +540,7 @@ function applyParams(){
   for (const c of chains){
     const t = c.ctx.currentTime;
     c.worklet.parameters.get("ratio").setTargetAtTime(m.ratio(+depthEl.value), t, 0.03);
+    c.worklet.parameters.get("formant").setValueAtTime(m.formant ? m.formant(+depthEl.value) : 0, t);
     c.worklet.parameters.get("ringFreq").setTargetAtTime(m.ring ? m.ring.freq : 0, t, 0.03);
     c.worklet.parameters.get("ringDepth").setTargetAtTime(m.ring ? m.ring.depth : 0, t, 0.03);
     c.echoGain.gain.setTargetAtTime((+echoEl.value / 100) * 0.55, t, 0.03);
